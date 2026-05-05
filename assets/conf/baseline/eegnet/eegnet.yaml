@@ -9,7 +9,7 @@ multitask: false  # Train separate models for each dataset
 # Data configuration
 data:
   datasets:
-#    tuab: 'finetune'
+    adhd: 'finetune'
   batch_size: 1024
   num_workers: 1
 
@@ -39,7 +39,7 @@ model:
 
 # Training configuration
 training:
-  max_epochs: 200
+  max_epochs: 50
   weight_decay: 0.01
   max_grad_norm: 3.0
 
@@ -83,4 +83,4 @@ logging:
 
   # Logging intervals
   log_step_interval: 2
-  ckpt_interval: 100
+  ckpt_interval: 10
