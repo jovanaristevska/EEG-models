@@ -7,8 +7,8 @@ from baseline.cbramod.cbramod_trainer import CBraModTrainer
 from baseline.csbrain.csbrain_adapter import CSBrainDataLoaderFactory
 from baseline.csbrain.csbrain_config import CSBrainConfig
 from baseline.csbrain.csbrain_trainer import CSBrainTrainer
-# from baseline.eegnet.eegnet_config import EegNetConfig
-# from baseline.eegnet.eegnet_trainer import EegNetTrainer
+from baseline.eegnet.eegnet_config import EegNetConfig
+from baseline.eegnet.eegnet_trainer import EegNetTrainer
 from baseline.eegpt.eegpt_adapter import EegptDataLoaderFactory
 from baseline.eegpt.eegpt_config import EegptConfig
 from baseline.eegpt.eegpt_trainer import EegptTrainer
@@ -24,6 +24,16 @@ from baseline.moment import MomentConfig, MomentDataLoaderFactory, MomentTrainer
 from baseline.reve.reve_adapter import ReveDataLoaderFactory
 from baseline.reve.reve_config import ReveConfig
 from baseline.reve.reve_trainer import ReveTrainer
+from baseline.neurogpt.neurogpt_config import NeuroGPTConfig
+from baseline.neurogpt.neurogpt_adapter import NeuroGPTDataLoaderFactory
+from baseline.neurogpt.neurogpt_trainer import NeuroGPTTrainer
+
+ModelRegistry.register_model(
+    model_type='neurogpt',
+    config_class=NeuroGPTConfig,
+    adapter_class=NeuroGPTDataLoaderFactory,
+    trainer_class=NeuroGPTTrainer,
+)
 
 ModelRegistry.register_model(
     model_type='eegpt',
@@ -74,12 +84,12 @@ ModelRegistry.register_model(
     trainer_class=CSBrainTrainer
 )
 
-# ModelRegistry.register_model(
-#     model_type='eegnet',
-#     config_class=EegNetConfig,
-#     adapter_class=None,
-#     trainer_class=EegNetTrainer
-# )
+ModelRegistry.register_model(
+    model_type='eegnet',
+    config_class=EegNetConfig,
+    adapter_class=None,
+    trainer_class=EegNetTrainer
+)
 
 # ModelRegistry.register_model(
 #     model_type='conformer',

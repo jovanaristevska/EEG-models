@@ -10,6 +10,7 @@ env/
 venv/
 ENV/
 eeg_env/
+dashboard_env/
 
 *.lock
 *.pyc
@@ -28,8 +29,35 @@ assets/data/
 *.arrow
 *.done
 
+
 # Logs and run outputs
 assets/run/
 
 # Summary files generated during preprocessing
 */summary/
+
+# Large model files
+*.bin
+*.safetensors
+
+# Build / cache
+build/
+dist/
+*.egg-info/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Torch / CUDA cache
+torch_extensions/
+
+# HuggingFace cache
+.cache/huggingface/
+
+# Temporary files
+tmp/
+temp/

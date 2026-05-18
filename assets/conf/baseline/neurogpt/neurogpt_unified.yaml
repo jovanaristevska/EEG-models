@@ -1,0 +1,80 @@
+seed: 42
+master_port: 51104
+multitask: false
+model_type: 'neurogpt'
+
+data:
+  batch_size: 32
+  num_workers: 1
+  datasets:
+    adhd: 'finetune'
+
+model:
+  # Претренирани тежини
+  pretrained_path: 'assets/pretrained/neurogpt/pytorch_model.bin'
+  
+  # EEGConformer (encoder) параметри
+  num_encoder_layers: 6        # att_depth во EEGConformer
+  n_filters_time: 40           # embedding dim на encoder
+  filter_time_length: 25
+  pool_time_length: 75
+  pool_time_stride: 15
+  drop_prob: 0.5
+  att_heads: 10
+  att_drop_prob: 0.5
+  
+  # GPT (decoder) параметри
+  num_hidden_layers: 6
+  embedding_dim: 1024          # embed_dim на GPT
+  num_attention_heads: 12
+  n_positions: 512
+  dropout: 0.1
+  
+  # Влезни параметри
+  chunk_len: 500               # должина на прозорец
+  num_chunks: 2                # број на прозорци
+  chunk_ovlp: 0                # преклопување
+  ft_only_encoder: true        # финтун само на encoder
+
+  # Класификатор
+  classifier_head:
+    head_type: 'avg_pool'
+    hidden_dims: [128]
+    dropout: 0.3
+
+training:
+  max_epochs: 50
+  weight_decay: 0.01
+  max_grad_norm: 3.0
+  lr_schedule: "cosine"
+  max_lr: 1e-4
+  encoder_lr_scale: 1.0
+  warmup_epochs: 5
+  warmup_scale: 0.1
+  min_lr: 5e-4
+  use_amp: false
+  freeze_encoder: false
+  label_smoothing: 0.1
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ['default']
+    lora_exclude_modules: null
+    lora_target_type: 'default'
+    lora_scope: 'transformer'
+    lora_lr_scale: 1.0
+
+logging:
+  experiment_name: "neurogpt"
+  run_dir: "assets/run"
+  use_cloud: true
+  cloud_backend: "wandb"
+  project: "neurogpt"
+  entity: null
+  api_key: null
+  offline: false
+  tags: ["neurogpt", "adhd", "finetune"]
+  log_step_interval: 2
+  ckpt_interval: 10

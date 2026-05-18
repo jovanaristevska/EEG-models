@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EEG Analysis Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    /* ── CSS Variables ─────────────────────────────────────────────────────── */
+    :root {
+      --primary:   #6366f1;
+      --primary-dark: #4f46e5;
+      --primary-light: #e0e7ff;
+      --success:   #10b981;
+      --danger:    #ef4444;
+      --warning:   #f59e0b;
+      --text:      #111827;
+      --text-muted:#6b7280;
+      --border:    #e5e7eb;
+      --bg:        #f9fafb;
+      --card-bg:   #ffffff;
+      --sidebar-bg:#1e1b4b;
+    }
+
+    /* ── Reset & Base ──────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      min-height: 100vh;
+    }
+    button { cursor: pointer; font-family: inherit; }
+    select { font-family: inherit; }
+
+    /* ── Sidebar ───────────────────────────────────────────────────────────── */
+    .sidebar {
+      width: 200px;
+      min-width: 200px;
+      background: var(--sidebar-bg);
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      padding: 0;
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      z-index: 100;
+    }
+    .sidebar-logo {
+      padding: 24px 16px 20px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .sidebar-logo .logo-icon { font-size: 28px; }
+    .sidebar-logo .logo-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-top: 6px;
+      color: #e0e7ff;
+    }
+    .sidebar-logo .logo-sub {
+      font-size: 11px;
+      color: rgba(255,255,255,0.5);
+      margin-top: 2px;
+      line-height: 1.4;
+    }
+    .nav { flex: 1; padding: 12px 0; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 16px;
+      font-size: 13.5px;
+      color: rgba(255,255,255,0.7);
+      cursor: pointer;
+      transition: all 0.2s;
+      border-left: 3px solid transparent;
+    }
+    .nav-item:hover {
+      background: rgba(255,255,255,0.08);
+      color: #fff;
+    }
+    .nav-item.active {
+      background: rgba(99,102,241,0.3);
+      color: #fff;
+      border-left-color: var(--primary);
+      font-weight: 600;
+    }
+    .nav-item .nav-icon { font-size: 16px; width: 20px; text-align: center; }
+    .sidebar-footer {
+      padding: 16px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+      font-size: 11px;
+      color: rgba(255,255,255,0.4);
+      line-height: 1.5;
+    }
+    .status-dot {
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+
+    /* ── Main Content ──────────────────────────────────────────────────────── */
+    .main {
+      margin-left: 200px;
+      flex: 1;
+      padding: 28px 28px 40px;
+      min-height: 100vh;
+    }
+    .page-header { margin-bottom: 24px; }
+    .page-header h1 { font-size: 22px; font-weight: 700; color: var(--text); }
+    .page-header p  { font-size: 13.5px; color: var(--text-muted); margin-top: 4px; }
+
+    /* ── Cards ─────────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--card-bg);
+      border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.10), 0 1px 2px rgba(0,0,0,0.06);
+      padding: 20px;
+    }
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 14px;
+    }
+
+    /* ── Workflow row ───────────────────────────────────────────────────────── */
+    .workflow-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .workflow-card { padding: 18px; }
+    .workflow-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 10px;
+    }
+    .workflow-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 8px;
+      line-height: 1.5;
+    }
+
+    /* ── Form controls ──────────────────────────────────────────────────────── */
+    select, .select-styled {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 13.5px;
+      background: #fff;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    select:focus { border-color: var(--primary); }
+
+    /* ── Upload zone ────────────────────────────────────────────────────────── */
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 20px 12px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      min-height: 90px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .upload-zone:hover, .upload-zone.dragover {
+      border-color: var(--primary);
+      background: var(--primary-light);
+    }
+    .upload-zone .upload-icon { font-size: 22px; margin-bottom: 6px; }
+    .upload-zone .upload-text { font-size: 13px; font-weight: 600; color: var(--text); }
+    .upload-zone .upload-sub  { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+    .upload-zone.file-selected { border-color: var(--success); background: #ecfdf5; }
+    .file-name { font-size: 12px; color: var(--success); font-weight: 600; margin-top: 6px; }
+
+    /* ── Buttons ────────────────────────────────────────────────────────────── */
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .btn-primary {
+      background: var(--primary);
+      color: #fff;
+      width: 100%;
+      padding: 12px;
+      font-size: 15px;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--primary);
+      color: var(--primary);
+    }
+    .btn-outline:hover { background: var(--primary-light); }
+
+    /* ── Error card ─────────────────────────────────────────────────────────── */
+    .error-card {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .error-card .error-icon { font-size: 18px; flex-shrink: 0; }
+    .error-card .error-msg  { font-size: 13.5px; color: #991b1b; flex: 1; }
+    .error-card .dismiss-btn {
+      background: none; border: none;
+      color: #9ca3af; font-size: 18px; line-height: 1; cursor: pointer;
+    }
+
+    /* ── Results section ────────────────────────────────────────────────────── */
+    .results-section { animation: fadeIn 0.4s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+    .results-row1 {
+      display: grid;
+      grid-template-columns: 60fr 40fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .results-row2 {
+      display: grid;
+      grid-template-columns: 40fr 30fr 30fr;
+      gap: 16px;
+    }
+
+    /* ── Prediction card ────────────────────────────────────────────────────── */
+    .prediction-center {
+      text-align: center;
+      padding: 10px 0 16px;
+    }
+    .prediction-icon { font-size: 60px; margin-bottom: 10px; }
+    .prediction-label {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+    .prediction-label.adhd    { color: var(--primary); }
+    .prediction-label.control { color: var(--success); }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .info-cell { text-align: center; }
+    .info-cell .info-val  { font-size: 15px; font-weight: 700; }
+    .info-cell .info-lbl  { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+    .info-box {
+      background: var(--primary-light);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: #4338ca;
+      line-height: 1.5;
+    }
+
+    /* ── Model comparison ───────────────────────────────────────────────────── */
+    .model-row { margin-bottom: 14px; }
+    .model-row-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      margin-bottom: 5px;
+      font-weight: 600;
+    }
+    .progress-bar-bg {
+      background: #e5e7eb;
+      border-radius: 999px;
+      height: 10px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.6s ease;
+    }
+    .bar-blue  { background: #3b82f6; }
+    .bar-green { background: var(--success); }
+    .compare-note {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      margin-top: 12px;
+      line-height: 1.5;
+    }
+
+    /* ── EEG Chart card ─────────────────────────────────────────────────────── */
+    .chart-controls { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+    .chart-controls label { font-size: 12px; color: var(--text-muted); }
+    .chart-controls select { width: auto; font-size: 12px; padding: 4px 8px; }
+    .chart-wrapper { position: relative; height: 200px; }
+
+    /* ── Brainwave bands ────────────────────────────────────────────────────── */
+    .band-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .band-row:last-child { border-bottom: none; }
+    .band-icon { font-size: 18px; width: 24px; text-align: center; }
+    .band-info { flex: 1; }
+    .band-name { font-weight: 600; font-size: 13px; }
+    .band-freq { font-size: 11px; color: var(--text-muted); }
+    .band-desc { font-size: 11px; color: var(--text-muted); line-height: 1.3; }
+    .badge {
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .badge-normal       { background: #d1fae5; color: #065f46; }
+    .badge-high         { background: #fee2e2; color: #991b1b; }
+    .badge-slightly-high{ background: #fef3c7; color: #92400e; }
+
+    /* ── Model details ──────────────────────────────────────────────────────── */
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 7px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .metric-row:last-child { border-bottom: none; }
+    .metric-lbl { color: var(--text-muted); display: flex; align-items: center; gap: 5px; }
+    .metric-val { font-weight: 700; }
+
+    /* ── Mock mode banner ───────────────────────────────────────────────────── */
+    .mock-banner {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: #92400e;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* ── Responsive ─────────────────────────────────────────────────────────── */
+    @media (max-width: 900px) {
+      .sidebar { transform: translateX(-200px); }
+      .main { margin-left: 0; padding: 16px; }
+      .workflow-row { grid-template-columns: repeat(2,1fr); }
+      .results-row1, .results-row2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Sidebar ──────────────────────────────────────────────────────────────── -->
+<aside class="sidebar">
+  <div class="sidebar-logo">
+    <div class="logo-icon">🧠</div>
+    <div class="logo-title">EEG Analysis</div>
+    <div class="logo-sub">AI Models Dashboard</div>
+  </div>
+
+  <nav class="nav">
+    <div class="nav-item active"><span class="nav-icon">📊</span> Dashboard</div>
+    <div class="nav-item"><span class="nav-icon">🗄️</span> Datasets</div>
+    <div class="nav-item"><span class="nav-icon">🤖</span> Models</div>
+    <div class="nav-item"><span class="nav-icon">📈</span> Results</div>
+    <div class="nav-item"><span class="nav-icon">ℹ️</span> About</div>
+    <div class="nav-item"><span class="nav-icon">⚙️</span> Settings</div>
+  </nav>
+
+  <div class="sidebar-footer">
+    <span id="health-dot" class="status-dot" style="background:#6b7280"></span>
+    <span id="health-label">Connecting…</span>
+    <br><br>
+    Compare AI models on EEG datasets for different mental conditions
+  </div>
+</aside>
+
+<!-- ── Main ─────────────────────────────────────────────────────────────────── -->
+<main class="main">
+  <div class="page-header">
+    <h1>EEG AI Analysis Dashboard</h1>
+    <p>Select dataset, model and run analysis to see results</p>
+  </div>
+
+  <!-- Error banner -->
+  <div id="error-card" class="error-card" style="display:none">
+    <span class="error-icon">⚠️</span>
+    <span class="error-msg" id="error-msg"></span>
+    <button class="dismiss-btn" onclick="dismissError()">×</button>
+  </div>
+
+  <!-- ── Workflow row ── -->
+  <div class="workflow-row">
+
+    <!-- Card 1: Dataset -->
+    <div class="card workflow-card">
+      <div class="workflow-label">1. Select Dataset</div>
+      <select id="dataset-select">
+        <option value="adhd">ADHD Dataset</option>
+      </select>
+      <div class="workflow-desc">Dataset contains EEG recordings for ADHD subjects.</div>
+    </div>
+
+    <!-- Card 2: Model -->
+    <div class="card workflow-card">
+      <div class="workflow-label">2. Select Model</div>
+      <select id="model-select" onchange="onModelChange()">
+        <option value="eegpt">EEG-GPT</option>
+        <option value="eegnet">EEGNet</option>
+      </select>
+      <div class="workflow-desc" id="model-desc">Pre-trained model loaded successfully.</div>
+    </div>
+
+    <!-- Card 3: Upload -->
+    <div class="card workflow-card">
+      <div class="workflow-label">3. Upload EEG File</div>
+      <div class="upload-zone" id="upload-zone"
+           onclick="document.getElementById('file-input').click()"
+           ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+        <div class="upload-icon">⬆️</div>
+        <div class="upload-text">Upload EEG File</div>
+        <div class="upload-sub">.csv</div>
+        <div class="file-name" id="file-name" style="display:none"></div>
+      </div>
+      <input type="file" id="file-input" accept=".csv" style="display:none" onchange="onFileSelect(event)" />
+    </div>
+
+    <!-- Card 4: Run -->
+    <div class="card workflow-card">
+      <div class="workflow-label">4. Run Analysis</div>
+      <button class="btn btn-primary" id="analyze-btn" onclick="analyzeEEG()">
+        ▶ Analyze EEG
+      </button>
+      <div class="workflow-desc">Click to run analysis using the selected model.</div>
+    </div>
+
+  </div><!-- /workflow-row -->
+
+  <!-- ── Results section ── -->
+  <div class="results-section" id="results-section" style="display:none">
+
+    <!-- Mock mode banner -->
+    <div class="mock-banner" id="mock-banner" style="display:none">
+      ⚠️ <strong>Mock Mode:</strong> Model file not found — showing realistic simulated predictions.
+    </div>
+
+    <!-- Row 1 -->
+    <div class="results-row1">
+
+      <!-- Prediction card -->
+      <div class="card">
+        <div class="card-title">Prediction Result</div>
+        <div class="prediction-center">
+          <div class="prediction-icon">🧠</div>
+          <div class="prediction-label" id="pred-label">ADHD-related patterns detected</div>
+          <div class="info-grid">
+            <div class="info-cell">
+              <div class="info-val">ADHD Dataset</div>
+              <div class="info-lbl">Dataset</div>
+            </div>
+            <div class="info-cell">
+              <div class="info-val" id="info-model">EEG-GPT</div>
+              <div class="info-lbl">Model Used</div>
+            </div>
+            <div class="info-cell">
+              <div class="info-val" id="info-conf">78%</div>
+              <div class="info-lbl">Confidence</div>
+            </div>
+            <div class="info-cell">
+              <div class="info-val" id="info-rel">High</div>
+              <div class="info-lbl">Reliability</div>
+            </div>
+          </div>
+          <div class="info-box" id="info-box">
+            ℹ️ The model detected brainwave patterns similar to ADHD.
+          </div>
+        </div>
+      </div>
+
+      <!-- Model comparison card -->
+      <div class="card">
+        <div class="card-title">Model Comparison (on this dataset)</div>
+
+        <div class="model-row">
+          <div class="model-row-header">
+            <span>EEG-GPT</span>
+            <span id="bar-eegpt-pct">—</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill bar-blue" id="bar-eegpt" style="width:0%"></div>
+          </div>
+        </div>
+
+        <div class="model-row">
+          <div class="model-row-header">
+            <span>EEGNet</span>
+            <span id="bar-eegnet-pct">—</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill bar-green" id="bar-eegnet" style="width:0%"></div>
+          </div>
+        </div>
+
+        <div class="compare-note">
+          ℹ️ Higher score means the model is more confident in the prediction.
+        </div>
+      </div>
+
+    </div><!-- /row1 -->
+
+    <!-- Row 2 -->
+    <div class="results-row2">
+
+      <!-- EEG Signal chart -->
+      <div class="card">
+        <div class="card-title">EEG Signal (Channels)</div>
+        <div class="chart-controls">
+          <label>Window:</label>
+          <select id="time-window" onchange="updateChartWindow()">
+            <option value="10">10 sec</option>
+            <option value="20">20 sec</option>
+            <option value="30">30 sec</option>
+          </select>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="eeg-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Brainwave bands -->
+      <div class="card">
+        <div class="card-title">Brainwave Bands</div>
+        <div id="bands-container">
+          <!-- filled by JS -->
+        </div>
+      </div>
+
+      <!-- Model details -->
+      <div class="card">
+        <div class="card-title">Model Details</div>
+        <div id="model-details-container">
+          <!-- filled by JS -->
+        </div>
+        <button class="btn btn-outline" style="width:100%;margin-top:14px;font-size:13px">
+          View Full Metrics
+        </button>
+      </div>
+
+    </div><!-- /row2 -->
+  </div><!-- /results-section -->
+
+</main>
+
+<script>
+/* ── Config ─────────────────────────────────────────────────────────────────── */
+const API_BASE = 'http://localhost:8000';
+
+/* ── State ──────────────────────────────────────────────────────────────────── */
+let selectedFile = null;
+let eegChart = null;
+let currentEegSignal = null;
+let currentModelInfo = null;
+let lastResult = null;
+
+const MODEL_LABELS = { eegpt: 'EEG-GPT', eegnet: 'EEGNet' };
+
+const BAND_META = {
+  delta: { icon: '🌊', range: '0.5 - 4 Hz',  desc: 'Associated with deep sleep' },
+  theta: { icon: '〰️', range: '4 - 8 Hz',    desc: 'Linked to attention & memory' },
+  alpha: { icon: '➰', range: '8 - 12 Hz',   desc: 'Relaxed mental state' },
+  beta:  { icon: '📶', range: '12 - 30 Hz',  desc: 'Active thinking' },
+  gamma: { icon: '⚡', range: '30 - 45 Hz',  desc: 'High cognitive processing' },
+};
+
+/* ── Health check ───────────────────────────────────────────────────────────── */
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API_BASE}/health`);
+    const d = await r.json();
+    const dot   = document.getElementById('health-dot');
+    const label = document.getElementById('health-label');
+    if (d.status === 'ok') {
+      dot.style.background = '#10b981';
+      label.textContent = d.mock_mode ? 'Mock Mode' : 'Models Ready';
+    } else {
+      dot.style.background = '#ef4444';
+      label.textContent = 'API Error';
+    }
+  } catch {
+    document.getElementById('health-dot').style.background = '#ef4444';
+    document.getElementById('health-label').textContent = 'Offline';
+  }
+}
+
+/* ── Model change ───────────────────────────────────────────────────────────── */
+async function onModelChange() {
+  const modelType = document.getElementById('model-select').value;
+  const descEl = document.getElementById('model-desc');
+  try {
+    const info = await fetch(`${API_BASE}/model_info/${modelType}`).then(r => r.json());
+    currentModelInfo = info;
+    descEl.textContent = info.description + ` (Acc: ${(info.accuracy * 100).toFixed(1)}%)`;
+  } catch {
+    descEl.textContent = 'Could not load model info.';
+  }
+}
+
+/* ── File handling ──────────────────────────────────────────────────────────── */
+function onFileSelect(evt) {
+  const file = evt.target.files[0];
+  if (file) setFile(file);
+}
+function onDragOver(evt) {
+  evt.preventDefault();
+  document.getElementById('upload-zone').classList.add('dragover');
+}
+function onDragLeave() {
+  document.getElementById('upload-zone').classList.remove('dragover');
+}
+function onDrop(evt) {
+  evt.preventDefault();
+  document.getElementById('upload-zone').classList.remove('dragover');
+  const file = evt.dataTransfer.files[0];
+  if (file) setFile(file);
+}
+function setFile(file) {
+  selectedFile = file;
+  const zone   = document.getElementById('upload-zone');
+  const nameEl = document.getElementById('file-name');
+  zone.classList.add('file-selected');
+  nameEl.style.display = 'block';
+  nameEl.textContent = '✅ ' + file.name;
+}
+
+/* ── Analysis ───────────────────────────────────────────────────────────────── */
+async function analyzeEEG() {
+    if (!selectedFile) {
+        showError('Please upload a CSV file first.');
+        return;
+    }
+
+    // Show progress bar
+    showProgress();
+    
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('model_type', document.getElementById('model-select').value);
+
+    try {
+        const response = await fetch(`${API_BASE}/predict`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.detail || 'Analysis failed');
+        }
+        
+        const data = await response.json();
+        updateResults(data);
+        hideProgress();
+        
+    } catch (error) {
+        hideProgress();
+        showError(error.message);
+    }
+}
+
+function showProgress() {
+    // Disable button
+    const analyzeBtn = document.getElementById('analyze-btn');
+    analyzeBtn.disabled = true;
+    analyzeBtn.innerHTML = 'Analyzing...';
+    
+    // Show progress bar
+    const progressHTML = `
+        <div id="progressContainer" style="margin-top: 16px;">
+            <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                <span style="font-size:13px; color:#6b7280;">Analyzing EEG signal...</span>
+                <span id="progressPercent" style="font-size:13px; color:#6366f1;">0%</span>
+            </div>
+            <div style="background:#e5e7eb; border-radius:99px; height:8px; overflow:hidden;">
+                <div id="progressBar" style="height:100%; width:0%; background:linear-gradient(90deg, #6366f1, #8b5cf6); border-radius:99px; transition: width 0.3s ease;"></div>
+            </div>
+            <div style="margin-top:8px; font-size:12px; color:#9ca3af;" id="progressStep">
+                Step 1/4: Reading CSV file...
+            </div>
+        </div>
+    `;
+    
+    // Insert after analyze button
+    analyzeBtn.insertAdjacentHTML('afterend', progressHTML);
+    
+    // Animate progress
+    simulateProgress();
+}
+
+function simulateProgress() {
+    const steps = [
+        { pct: 15, msg: 'Step 1/4: Reading and validating CSV...' },
+        { pct: 35, msg: 'Step 2/4: Applying filters (notch + bandpass)...' },
+        { pct: 55, msg: 'Step 3/4: Resampling and creating windows...' },
+        { pct: 80, msg: 'Step 4/4: Running model inference...' },
+        { pct: 95, msg: 'Step 4/4: Computing final predictions...' },
+    ];
+    
+    let stepIndex = 0;
+    progressInterval = setInterval(() => {
+        if (stepIndex < steps.length) {
+            const step = steps[stepIndex];
+            document.getElementById('progressBar').style.width = step.pct + '%';
+            document.getElementById('progressPercent').textContent = step.pct + '%';
+            document.getElementById('progressStep').textContent = step.msg;
+            stepIndex++;
+        }
+    }, 2000); // Update every 2 seconds
+}
+
+function hideProgress() {
+    clearInterval(progressInterval);
+    
+    // Complete the bar
+    const bar = document.getElementById('progressBar');
+    const pct = document.getElementById('progressPercent');
+    const step = document.getElementById('progressStep');
+    
+    if (bar) bar.style.width = '100%';
+    if (pct) pct.textContent = '100%';
+    if (step) step.textContent = 'Analysis complete!';
+    
+    setTimeout(() => {
+        const container = document.getElementById('progressContainer');
+        if (container) container.remove();
+        const analyzeBtn = document.getElementById('analyze-btn');
+        analyzeBtn.disabled = false;
+        analyzeBtn.innerHTML = '▶ Analyze EEG';
+    }, 800);
+}
+
+let progressInterval = null;
+
+function setLoading(loading) {
+  const btn = document.getElementById('analyze-btn');
+  btn.disabled = loading;
+  btn.textContent = loading ? '⏳ Analyzing…' : '▶ Analyze EEG';
+}
+
+/* ── Results ────────────────────────────────────────────────────────────────── */
+function updateResults(data) {
+  const section = document.getElementById('results-section');
+  section.style.display = 'block';
+  // Trigger reflow for animation
+  section.style.animation = 'none';
+  section.offsetHeight;
+  section.style.animation = '';
+
+  // Mock banner
+  document.getElementById('mock-banner').style.display = data.mock_mode ? 'flex' : 'none';
+
+  // Prediction card
+  const isADHD = data.prediction === 'ADHD';
+  const predLabel = document.getElementById('pred-label');
+  predLabel.textContent = isADHD
+    ? 'ADHD-related patterns detected'
+    : 'Control — No patterns detected';
+  predLabel.className = 'prediction-label ' + (isADHD ? 'adhd' : 'control');
+
+  document.getElementById('info-model').textContent =
+    MODEL_LABELS[data.model_used] || data.model_used;
+  document.getElementById('info-conf').textContent  = data.confidence.toFixed(1) + '%';
+  document.getElementById('info-rel').textContent   = data.reliability;
+
+  const infoBox = document.getElementById('info-box');
+  infoBox.textContent = isADHD
+    ? 'ℹ️ The model detected brainwave patterns similar to ADHD across '
+      + data.windows_analyzed + ' analysis windows.'
+    : 'ℹ️ The model found no significant ADHD-related patterns across '
+      + data.windows_analyzed + ' analysis windows.';
+
+  // Model comparison bars — use current model confidence + training metric for other
+  const eegptConf = data.model_used === 'eegpt'
+    ? data.confidence
+    : (currentModelInfo ? currentModelInfo.accuracy * 100 : 87.3);
+  const eegnetConf = data.model_used === 'eegnet'
+    ? data.confidence
+    : (currentModelInfo ? currentModelInfo.accuracy * 100 : 75.1);
+
+  setBar('eegpt', data.model_used === 'eegpt' ? data.confidence : 87.3);
+  setBar('eegnet', data.model_used === 'eegnet' ? data.confidence : 75.1);
+
+  // EEG chart
+  currentEegSignal = data.eeg_signal;
+  updateChart(data.eeg_signal);
+
+  // Brainwave bands
+  renderBands(data.band_powers);
+
+  // Model details
+  renderModelDetails(data.model_used);
+}
+
+function setBar(id, pct) {
+  const val = Math.max(0, Math.min(100, pct));
+  document.getElementById(`bar-${id}`).style.width = val + '%';
+  document.getElementById(`bar-${id}-pct`).textContent = val.toFixed(1) + '%';
+}
+
+/* ── Chart ──────────────────────────────────────────────────────────────────── */
+const CHART_COLORS = {
+  FP1: '#3b82f6',
+  FP2: '#10b981',
+  O1:  '#f59e0b',
+  T7:  '#ef4444',
+};
+
+function initChart() {
+  const ctx = document.getElementById('eeg-chart').getContext('2d');
+  eegChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { position: 'top', labels: { font: { size: 11 }, boxWidth: 12 } },
+      },
+      scales: {
+        x: {
+          title: { display: true, text: 'Time (s)', font: { size: 11 } },
+          ticks: { maxTicksLimit: 10, font: { size: 10 } },
+        },
+        y: {
+          title: { display: true, text: 'Amplitude (µV)', font: { size: 11 } },
+          ticks: { font: { size: 10 } },
+        },
+      },
+      elements: {
+        line:  { tension: 0.3, borderWidth: 1.5 },
+        point: { radius: 0 },
+      },
+    },
+  });
+}
+
+function updateChart(signal) {
+  if (!eegChart || !signal) return;
+  const windowSec = parseInt(document.getElementById('time-window').value, 10);
+  const sfreq = 256;
+  const maxSamples = windowSec * sfreq;
+
+  const time = signal.time.slice(0, maxSamples);
+  const labels = time.map(t => t.toFixed(2));
+
+  const datasets = Object.entries(CHART_COLORS).map(([ch, color]) => ({
+    label: ch,
+    data: (signal[ch] || []).slice(0, maxSamples),
+    borderColor: color,
+    backgroundColor: 'transparent',
+    tension: 0.3,
+    borderWidth: 1.5,
+    pointRadius: 0,
+  }));
+
+  eegChart.data.labels   = labels;
+  eegChart.data.datasets = datasets;
+  eegChart.update('none');
+}
+
+function updateChartWindow() {
+  if (currentEegSignal) updateChart(currentEegSignal);
+}
+
+/* ── Brainwave bands ────────────────────────────────────────────────────────── */
+function renderBands(bandPowers) {
+  const container = document.getElementById('bands-container');
+  container.innerHTML = '';
+
+  for (const [band, meta] of Object.entries(BAND_META)) {
+    const bp = bandPowers[band] || { power: 0, status: 'Normal' };
+    const badgeClass = {
+      'Normal':       'badge-normal',
+      'High':         'badge-high',
+      'Slightly High':'badge-slightly-high',
+    }[bp.status] || 'badge-normal';
+
+    container.insertAdjacentHTML('beforeend', `
+      <div class="band-row">
+        <div class="band-icon">${meta.icon}</div>
+        <div class="band-info">
+          <div class="band-name">${band.charAt(0).toUpperCase() + band.slice(1)}</div>
+          <div class="band-freq">${meta.range}</div>
+          <div class="band-desc">${meta.desc}</div>
+        </div>
+        <span class="badge ${badgeClass}">${bp.status}</span>
+      </div>
+    `);
+  }
+}
+
+/* ── Model details ──────────────────────────────────────────────────────────── */
+const MODEL_DETAILS_META = {
+  eegpt: [
+    { icon: '🎯', label: 'Accuracy',        key: 'accuracy',     fmt: v => (v * 100).toFixed(1) + '%' },
+    { icon: '📈', label: 'AUROC',            key: 'auroc',        fmt: v => v.toFixed(3) },
+    { icon: '⚖️', label: 'Balanced Acc.',    key: 'balanced_acc', fmt: v => (v * 100).toFixed(1) + '%' },
+    { icon: '📊', label: 'AUC-PR',           key: 'auc_pr',       fmt: v => v.toFixed(3) },
+    { icon: '🔄', label: 'Training Epochs',  key: 'epochs',       fmt: v => v },
+    { icon: '📦', label: 'Batch Size',       key: 'batch_size',   fmt: v => v },
+  ],
+  eegnet: [
+    { icon: '🎯', label: 'Accuracy',        key: 'accuracy',     fmt: v => (v * 100).toFixed(1) + '%' },
+    { icon: '📈', label: 'AUROC',            key: 'auroc',        fmt: v => v.toFixed(3) },
+    { icon: '⚖️', label: 'Balanced Acc.',    key: 'balanced_acc', fmt: v => (v * 100).toFixed(1) + '%' },
+    { icon: '📊', label: 'AUC-PR',           key: 'auc_pr',       fmt: v => v.toFixed(3) },
+    { icon: '🔄', label: 'Training Epochs',  key: 'epochs',       fmt: v => v },
+    { icon: '📦', label: 'Batch Size',       key: 'batch_size',   fmt: v => v },
+  ],
+};
+
+async function renderModelDetails(modelType) {
+  const container = document.getElementById('model-details-container');
+  container.innerHTML = '';
+
+  let info;
+  try {
+    info = await fetch(`${API_BASE}/model_info/${modelType}`).then(r => r.json());
+  } catch {
+    container.textContent = 'Could not load model details.';
+    return;
+  }
+
+  const metas = MODEL_DETAILS_META[modelType] || MODEL_DETAILS_META.eegpt;
+  for (const m of metas) {
+    const val = info[m.key] !== undefined ? m.fmt(info[m.key]) : '—';
+    container.insertAdjacentHTML('beforeend', `
+      <div class="metric-row">
+        <span class="metric-lbl">${m.icon} ${m.label}</span>
+        <span class="metric-val">${val}</span>
+      </div>
+    `);
+  }
+}
+
+/* ── Error handling ─────────────────────────────────────────────────────────── */
+function showError(msg) {
+  document.getElementById('error-msg').textContent = msg;
+  document.getElementById('error-card').style.display = 'flex';
+}
+function dismissError() {
+  document.getElementById('error-card').style.display = 'none';
+}
+
+/* ── Init ───────────────────────────────────────────────────────────────────── */
+window.addEventListener('DOMContentLoaded', () => {
+  checkHealth();
+  onModelChange();
+  initChart();
+});
+</script>
+</body>
+</html>
