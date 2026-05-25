@@ -4,37 +4,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from baseline.moment import model
-
 logger = logging.getLogger(__name__)
 
 # Label mapping: index 0 = ADHD, index 1 = Control
 LABELS = {0: 'ADHD', 1: 'Control'}
 
 
-def _reliability(confidence: float) -> str:
-    if confidence > 75:
-        return 'High'
-    elif confidence > 55:
-        return 'Medium'
-    return 'Low'
-
-
 class InferenceEngine:
-    # def predict(self, windows_tensor: np.ndarray, model, model_type: str) -> dict:
-    #     n_windows = windows_tensor.shape[0]
-
-    #     if model is None:
-    #         return self._mock_predict(n_windows, model_type)
-
-    #     try:
-    #         return self._real_predict(windows_tensor, model, model_type, n_windows)
-    #     except Exception as e:
-    #         logger.error(f"Real inference failed ({e}), falling back to mock")
-    #         return self._mock_predict(n_windows, model_type)
-
-    # # ── real inference ────────────────────────────────────────────────────────
-
 
     def predict(self, windows_tensor, model, model_type: str) -> dict:
         if model is None:
@@ -104,73 +80,73 @@ class InferenceEngine:
             "window_predictions": window_predictions
         }
    
-    def _real_predict(self, windows_tensor, model, model_type, n_windows):
-        tensor = torch.FloatTensor(windows_tensor)  # (N, 19, 1024)
+    # def _real_predict(self, windows_tensor, model, model_type, n_windows):
+    #     tensor = torch.FloatTensor(windows_tensor)  # (N, 19, 1024)
 
-        window_preds = []
-        all_probs = []
+    #     window_preds = []
+    #     all_probs = []
 
-        with torch.no_grad():
-            # Process in mini-batches of 8 to avoid OOM
-            batch_size = 8
-            for start in range(0, n_windows, batch_size):
-                batch = tensor[start:start + batch_size]
+    #     with torch.no_grad():
+    #         # Process in mini-batches of 8 to avoid OOM
+    #         batch_size = 8
+    #         for start in range(0, n_windows, batch_size):
+    #             batch = tensor[start:start + batch_size]
 
-                if model_type == 'eegpt':
-                    chan_ids = list(range(batch.size(1)))
-                    logits = model(batch, chan_ids=chan_ids)
-                else:
-                    logits = model(batch)
+    #             if model_type == 'eegpt':
+    #                 chan_ids = list(range(batch.size(1)))
+    #                 logits = model(batch, chan_ids=chan_ids)
+    #             else:
+    #                 logits = model(batch)
 
-                probs = F.softmax(logits, dim=1)  # (B, 2)
-                all_probs.append(probs.cpu().numpy())
+    #             probs = F.softmax(logits, dim=1)  # (B, 2)
+    #             all_probs.append(probs.cpu().numpy())
 
-        all_probs = np.concatenate(all_probs, axis=0)  # (N, 2)
+    #     all_probs = np.concatenate(all_probs, axis=0)  # (N, 2)
 
-        for i, probs in enumerate(all_probs):
-            pred_idx = int(np.argmax(probs))
-            window_preds.append({
-                'window': i + 1,
-                'prediction': LABELS[pred_idx],
-                'confidence': round(float(probs[pred_idx]), 4),
-            })
+    #     for i, probs in enumerate(all_probs):
+    #         pred_idx = int(np.argmax(probs))
+    #         window_preds.append({
+    #             'window': i + 1,
+    #             'prediction': LABELS[pred_idx],
+    #             'confidence': round(float(probs[pred_idx]), 4),
+    #         })
 
-        # Majority vote
-        votes = [p['prediction'] for p in window_preds]
-        adhd_votes = votes.count('ADHD')
-        overall_label = 'ADHD' if adhd_votes >= n_windows / 2 else 'Control'
-        label_idx = 0 if overall_label == 'ADHD' else 1
-        mean_conf = float(all_probs[:, label_idx].mean()) * 100
+    #     # Majority vote
+    #     votes = [p['prediction'] for p in window_preds]
+    #     adhd_votes = votes.count('ADHD')
+    #     overall_label = 'ADHD' if adhd_votes >= n_windows / 2 else 'Control'
+    #     label_idx = 0 if overall_label == 'ADHD' else 1
+    #     mean_conf = float(all_probs[:, label_idx].mean()) * 100
 
-        return {
-            'prediction': overall_label,
-            'confidence': round(mean_conf, 1),
-            'reliability': _reliability(mean_conf),
-            'window_predictions': window_preds,
-        }
+    #     return {
+    #         'prediction': overall_label,
+    #         'confidence': round(mean_conf, 1),
+    #         'reliability': _reliability(mean_conf),
+    #         'window_predictions': window_preds,
+    #     }
 
-    # ── mock inference ────────────────────────────────────────────────────────
+    # # ── mock inference ────────────────────────────────────────────────────────
 
-    def _mock_predict(self, n_windows: int, model_type: str) -> dict:
-        rng = random.Random()
-        overall_adhd_prob = rng.uniform(0.55, 0.85)
-        overall_label = 'ADHD' if overall_adhd_prob > 0.5 else 'Control'
-        confidence = overall_adhd_prob * 100 if overall_label == 'ADHD' else (1 - overall_adhd_prob) * 100
+    # def _mock_predict(self, n_windows: int, model_type: str) -> dict:
+    #     rng = random.Random()
+    #     overall_adhd_prob = rng.uniform(0.55, 0.85)
+    #     overall_label = 'ADHD' if overall_adhd_prob > 0.5 else 'Control'
+    #     confidence = overall_adhd_prob * 100 if overall_label == 'ADHD' else (1 - overall_adhd_prob) * 100
 
-        window_preds = []
-        for i in range(n_windows):
-            p = rng.gauss(overall_adhd_prob, 0.1)
-            p = max(0.05, min(0.95, p))
-            label = 'ADHD' if p > 0.5 else 'Control'
-            window_preds.append({
-                'window': i + 1,
-                'prediction': label,
-                'confidence': round(p if label == 'ADHD' else 1 - p, 4),
-            })
+    #     window_preds = []
+    #     for i in range(n_windows):
+    #         p = rng.gauss(overall_adhd_prob, 0.1)
+    #         p = max(0.05, min(0.95, p))
+    #         label = 'ADHD' if p > 0.5 else 'Control'
+    #         window_preds.append({
+    #             'window': i + 1,
+    #             'prediction': label,
+    #             'confidence': round(p if label == 'ADHD' else 1 - p, 4),
+    #         })
 
-        return {
-            'prediction': overall_label,
-            'confidence': round(confidence, 1),
-            'reliability': _reliability(confidence),
-            'window_predictions': window_preds,
-        }
+    #     return {
+    #         'prediction': overall_label,
+    #         'confidence': round(confidence, 1),
+    #         'reliability': _reliability(confidence),
+    #         'window_predictions': window_preds,
+    #     }

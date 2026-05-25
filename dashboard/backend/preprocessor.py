@@ -17,7 +17,7 @@ VIZ_CHANNELS = ['FP1', 'FP2', 'O1', 'T7']
 
 
 def _band_power(freqs, psd, f_low, f_high):
-    mask = (freqs >= f_low) & (freqs <= f_high)
+    mask = (freqs >= f_low) & (freqs < f_high)
     return float(np.trapz(psd[mask], freqs[mask]))
 
 
@@ -71,10 +71,10 @@ class PreprocessorPipeline:
         trimmed = data_resampled[:, :n_windows * WINDOW_SAMPLES]
         windows = trimmed.reshape(19, n_windows, WINDOW_SAMPLES)
         windows_tensor = windows.transpose(1, 0, 2)  # (N, 19, 1024)
-        MAX_WINDOWS = 20
-        if windows_tensor.shape[0] > MAX_WINDOWS:
-            windows_tensor = windows_tensor[:MAX_WINDOWS]
-            n_windows = MAX_WINDOWS
+        # MAX_WINDOWS = 20
+        # if windows_tensor.shape[0] > MAX_WINDOWS:
+        #     windows_tensor = windows_tensor[:MAX_WINDOWS]
+        #     n_windows = MAX_WINDOWS
 
         # EEG signal visualization (first 10 sec, selected channels)
         viz_data = data_resampled[:, :VIZ_SAMPLES]
@@ -82,14 +82,14 @@ class PreprocessorPipeline:
         eeg_signal = {'time': t.tolist()}
         for ch in VIZ_CHANNELS:
             idx = CHANNELS.index(ch)
-            eeg_signal[ch] = (viz_data[idx] * 1e6).tolist()  # V → µV
+            eeg_signal[ch] = (viz_data[idx]).tolist() 
 
         # Band powers on mean of all channels
         mean_signal = data_resampled.mean(axis=0)
         freqs, psd = welch(mean_signal, fs=SFREQ_OUTPUT, nperseg=512)
 
         # Scale to a displayable range (µV²/Hz)
-        psd_uv = psd * 1e12
+        psd_uv = psd
 
         bands = {
             'delta': (0.5, 4),

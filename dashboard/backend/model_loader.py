@@ -361,6 +361,9 @@ def load_eegnet(path: str):
             if k.startswith('module.encoder.'):
                 key = k[len('module.encoder.'):]
                 clean[key] = v
+        if not clean:
+            logger.error("EEGNet: no weights matched 'module.encoder.' prefix — checkpoint may use different naming")
+            return None
         
         missing, unexpected = model.load_state_dict(clean, strict=False)
         if missing:
