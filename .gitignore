@@ -61,3 +61,6 @@ torch_extensions/
 # Temporary files
 tmp/
 temp/
+# Local backups
+data/dataset/*_backup.py
+

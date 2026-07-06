@@ -2,8 +2,12 @@
 # anxiety.py
 # EEG-FM-Bench dataset builder for the DASPS Anxiety dataset
 #
-# CHANGED: _divide_split now does SUBJECT-LEVEL split to prevent
-# data leakage between train/valid/test.
+# VERSION 2 (updated):
+# - Uses official DASPS_HAM_labels.mat pre-labeled data
+# - Labels: SAM Arousal > 5 AND Valence < 5 → Anxiety, else Control
+# - Data source: pre-converted CSV files in subjects/ folder
+# - Metadata source: anxiety_v2_finetune_info.csv
+# - SUBJECT-LEVEL split to prevent data leakage
 # ============================================================
 
 import logging
@@ -19,12 +23,6 @@ import mne
 import numpy as np
 import pandas as pd
 from pandas import DataFrame
-
-try:
-    import mat73
-    _HAS_MAT73 = True
-except ImportError:
-    _HAS_MAT73 = False
 
 from common.type import DatasetTaskType
 from data.processor.builder import EEGConfig, EEGDatasetBuilder
@@ -45,8 +43,8 @@ class AnxietyConfig(EEGConfig):
         "DASPS database (Database for Anxious States based on a Psychological "
         "Stimulation). 23 adult participants (ages 18-45) recorded during anxiety "
         "elicitation via face-to-face psychological stimuli. 14 EEG channels via "
-        "Emotiv EPOC+ headset at 128 Hz. Per-trial labels derived from SAM arousal "
-        "ratings (threshold > 5 -> Anxiety). Total: 276 labelled trials."
+        "Emotiv EPOC+ headset at 128 Hz. Per-trial labels from official DASPS+HAM "
+        "labels: SAM Arousal > 5 AND Valence < 5 -> Anxiety. Total: 276 labelled trials."
     )
 
     citation: Optional[str] = """\
@@ -84,10 +82,14 @@ class AnxietyConfig(EEGConfig):
 
     suffix_path: str = 'Anxiety'
     scan_sub_dir: str = 'subjects'
-    mat_sub_dir: str = 'raw_mat'
+    meta_info_file: str = 'summary/finetune/anxiety_v2_finetune_info.csv'
 
     category: list[str] = field(default_factory=lambda: ['Anxiety', 'Control'])
+
+    # NEW: SAM-based labelling thresholds
     arousal_threshold: float = 5.0
+    valence_threshold: float = 5.0
+
     orig_fs: float = 128.0
 
 
@@ -109,91 +111,62 @@ class AnxietyBuilder(EEGDatasetBuilder):
         self._load_meta_info()
 
     def _load_meta_info(self):
-
-        mat_dir = os.path.join(self.config.raw_path, self.config.mat_sub_dir)
+        """
+        Load pre-computed metadata from anxiety_v2_finetune_info.csv.
+        The CSV was produced by convert_ham_labels_to_csv.py from the
+        official DASPS_HAM_labels.mat file.
+        """
         subjects_dir = os.path.join(self.config.raw_path, self.config.scan_sub_dir)
-        os.makedirs(subjects_dir, exist_ok=True)
+        meta_path = os.path.join(self.config.raw_path, self.config.meta_info_file)
 
-        if not os.path.exists(mat_dir):
+        # Verify CSV files exist
+        if not os.path.exists(subjects_dir):
             raise FileNotFoundError(
-                f"Could not find DASPS .mat folder at: {mat_dir}\n"
-                f"Please create this folder and place the 23 S01.mat - S23.mat files inside."
-            )
-
-        if not _HAS_MAT73:
-            raise ImportError(
-                "mat73 library is required to read DASPS .mat v7.3 files.\n"
-                "Install with: pip install mat73"
+                f"Could not find subjects folder at: {subjects_dir}\n"
+                f"Please run convert_ham_labels_to_csv.py first."
             )
 
         existing_csvs = [f for f in os.listdir(subjects_dir) if f.endswith('.csv')]
-        expected_csvs = 23 * 12
+        expected_csvs = 23 * 12  # 276
 
         if len(existing_csvs) < expected_csvs:
-            logger.info(f"Converting DASPS .mat files to per-trial CSVs...")
-            self._convert_mat_files_to_csvs(mat_dir, subjects_dir)
-        else:
-            logger.info(f"Found {len(existing_csvs)} existing CSV files, skipping conversion.")
+            raise FileNotFoundError(
+                f"Expected {expected_csvs} CSV files in {subjects_dir}, "
+                f"found only {len(existing_csvs)}.\n"
+                f"Please run convert_ham_labels_to_csv.py first."
+            )
 
-        logger.info("Building subject metadata table...")
-        records = []
+        logger.info(f"Found {len(existing_csvs)} CSV files in subjects folder.")
 
-        for subject_idx in range(1, 24):
-            mat_name = f'S{subject_idx:02d}.mat'
-            mat_path = os.path.join(mat_dir, mat_name)
+        # Load metadata CSV
+        if not os.path.exists(meta_path):
+            raise FileNotFoundError(
+                f"Could not find metadata CSV at: {meta_path}\n"
+                f"Please run convert_ham_labels_to_csv.py first."
+            )
 
-            if not os.path.exists(mat_path):
-                continue
+        logger.info(f"Loading metadata from: {meta_path}")
+        self.sub_meta = pd.read_csv(meta_path)
 
-            mat = mat73.loadmat(mat_path)
-            sam_labels = mat['labels']
+        # Verify metadata has required columns
+        required_cols = ['subject', 'original_subject', 'valence', 'arousal', 'label']
+        for col in required_cols:
+            if col not in self.sub_meta.columns:
+                raise ValueError(
+                    f"Metadata CSV missing required column: {col}\n"
+                    f"Available columns: {self.sub_meta.columns.tolist()}"
+                )
 
-            for trial_idx in range(12):
-                arousal = float(sam_labels[trial_idx, 1])
-                label = 'Anxiety' if arousal > self.config.arousal_threshold else 'Control'
-
-                records.append({
-                    'subject': f'S{subject_idx:02d}t{trial_idx+1:02d}',
-                    'original_subject': f'S{subject_idx:02d}',
-                    'label': label,
-                    'arousal': arousal,
-                })
-
-        self.sub_meta = pd.DataFrame(records)
-
+        # Report statistics
         n_anx = len(self.sub_meta[self.sub_meta['label'] == 'Anxiety'])
         n_ctrl = len(self.sub_meta[self.sub_meta['label'] == 'Control'])
         n_orig = self.sub_meta['original_subject'].nunique()
         logger.info(
             f"Metadata ready: {n_anx} Anxiety, {n_ctrl} Control trials "
-            f"from {n_orig} original participants."
+            f"from {n_orig} original participants "
+            f"(labelling: arousal > {self.config.arousal_threshold} AND "
+            f"valence < {self.config.valence_threshold})."
         )
-
-    def _convert_mat_files_to_csvs(self, mat_dir: str, subjects_dir: str):
-        channels = self.config.montage['emotiv_14']
-
-        for subject_idx in range(1, 24):
-            mat_name = f'S{subject_idx:02d}.mat'
-            mat_path = os.path.join(mat_dir, mat_name)
-
-            if not os.path.exists(mat_path):
-                continue
-
-            mat = mat73.loadmat(mat_path)
-            data = mat['data']
-
-            for trial_idx in range(12):
-                subject_id = f'S{subject_idx:02d}t{trial_idx+1:02d}'
-                out_path = os.path.join(subjects_dir, f'{subject_id}.csv')
-
-                if os.path.exists(out_path):
-                    continue
-
-                trial_data = data[:, :, trial_idx].T
-                df = pd.DataFrame(trial_data, columns=channels)
-                df.to_csv(out_path, index=False)
-
-            logger.info(f"  Processed {mat_name} -> 12 trial CSVs")
 
     def _walk_raw_data_files(self):
         subjects_dir = os.path.join(self.config.raw_path, self.config.scan_sub_dir)
@@ -246,9 +219,8 @@ class AnxietyBuilder(EEGDatasetBuilder):
     # CUSTOM _divide_split — prevents data leakage
     # ==================================================================
     def _divide_split(self, df: DataFrame) -> DataFrame:
-        # 🔍 DEBUG: Force-print to verify this override is actually called
         print("\n" + "=" * 70)
-        print(">>> CUSTOM SUBJECT-LEVEL _divide_split IS RUNNING <<<")
+        print(">>> CUSTOM SUBJECT-LEVEL _divide_split IS RUNNING (v2) <<<")
         print("=" * 70)
         print(f"Input df: shape={df.shape}, columns={df.columns.tolist()}")
 
