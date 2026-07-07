@@ -1,0 +1,79 @@
+# EEGNet Anxiety Training Configuration
+# Mirror of eegnet.yaml but targeting the anxiety dataset (DASPS, 14 channels)
+
+# Basic configuration
+seed: 456
+master_port: 51112                # Different port from eegnet adhd (51100)
+multitask: false
+
+# Data configuration
+data:
+  datasets:
+    anxiety: 'finetune'           # ← Anxiety dataset instead of adhd
+  batch_size: 32
+  num_workers: 1
+
+# Model configuration
+model:
+  pretrained_path: null
+
+  # Classifier head configuration
+  classifier_head:
+    head_type: 'avg_pool'
+    
+    hidden_dims: [128]
+    dropout: 0.3
+    
+    attn_n_head: 4
+    attn_head_dim: 64
+    
+    fusion_mode: 'dual'
+    fusion_n_head: 4
+    fusion_head_dim: 64
+    fusion_use_rope: true
+    fusion_rope_theta: 10000.0
+    fusion_max_seq_len: 1024
+
+# Training configuration
+training:
+  max_epochs: 20
+  weight_decay: 0.01
+  max_grad_norm: 3.0
+
+  lr_schedule: "cosine"
+  max_lr: 5e-3
+  encoder_lr_scale: 1.0
+  warmup_epochs: 5
+  warmup_scale: 1e-1
+  pct_start: 0.1
+  min_lr: 5e-4
+
+  use_amp: false
+  freeze_encoder: false
+
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ['default']
+    lora_exclude_modules: null
+    lora_target_type: 'default'
+    lora_scope: 'transformer'
+    lora_lr_scale: 1.0
+
+# Logging configuration
+logging:
+  experiment_name: "eegnet_anxiety_s456"
+  run_dir: "assets/run"
+
+  use_cloud: true
+  cloud_backend: "wandb"
+
+  project: "eegnet_anxiety_s456"       # ← Different project name
+  offline: false
+
+  tags: ["eegnet", "anxiety", "dasps", "14ch"]
+
+  log_step_interval: 2
+  ckpt_interval: 1
