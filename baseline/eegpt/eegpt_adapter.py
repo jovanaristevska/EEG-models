@@ -19,7 +19,6 @@ class EegptDatasetAdapter(AbstractDatasetAdapter, StandardEEGChannelsMixin):
     def _setup_adapter(self):
         """Initialize EEGPT-specific adapter configurations."""
         self.model_name = 'eegpt'
-        self.scale = 0.001  # convert uV to mV
         super()._setup_adapter()
 
     def get_supported_channels(self) -> List[str]:

@@ -10,7 +10,7 @@ multitask: false              # Train separate model for this dataset
 data:
   datasets:
     adhd_crown: 'finetune'    # CHANGED: was 'adhd'
-  batch_size: 1024
+  batch_size: 32
   num_workers: 1
 
 # Model configuration

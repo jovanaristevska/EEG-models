@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from datasets import Dataset as HFDataset
 
-from baseline.abstract.adapter import AbstractDataLoaderFactory
+from baseline.abstract.adapter import AbstractDataLoaderFactory, StandardEEGChannelsMixin
 from baseline.abstract.classical import ClassicalTrainer
 from baseline.neurogpt.neurogpt_config import NeuroGPTConfig
 from baseline.neurogpt.neurogpt_adapter import NeuroGPTDataLoaderFactory
@@ -63,6 +63,7 @@ class NeuroGPTTrainer(ClassicalTrainer):
             num_chunks=model_cfg.num_chunks,
             chunk_len=model_cfg.chunk_len,
             ft_only_encoder=model_cfg.ft_only_encoder,
+            num_std_channels=len(StandardEEGChannelsMixin.get_standard_eeg_channels()),
         )
 
         # Load pretrained weights if specified
@@ -74,9 +75,7 @@ class NeuroGPTTrainer(ClassicalTrainer):
 
         model = self.apply_lora(model)
         model = model.to(self.device)
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[self.local_rank], find_unused_parameters=True
-        )
+        model = self.maybe_wrap_ddp(model, find_unused_parameters=True)
 
         self.model = model
         logger.info(f"NeuroGPT model setup complete for dataset: {ds_name}")

@@ -1,0 +1,65 @@
+# EEGNet ADHD-19 — k-fold CV variant, mirrors eegnet.yaml
+
+seed: 42
+master_port: 52064
+multitask: false
+
+data:
+  datasets:
+    adhd: 'finetune_fold4'
+  batch_size: 32
+  num_workers: 1
+
+model:
+  pretrained_path: null
+
+  classifier_head:
+    head_type: 'avg_pool'
+    hidden_dims: [128]
+    dropout: 0.3
+    attn_n_head: 4
+    attn_head_dim: 64
+    fusion_mode: 'dual'
+    fusion_n_head: 4
+    fusion_head_dim: 64
+    fusion_use_rope: true
+    fusion_rope_theta: 10000.0
+    fusion_max_seq_len: 1024
+
+training:
+  max_epochs: 50
+  weight_decay: 0.01
+  max_grad_norm: 3.0
+
+  lr_schedule: "cosine"
+  max_lr: 5e-3
+  encoder_lr_scale: 1.0
+  warmup_epochs: 5
+  warmup_scale: 1e-1
+  pct_start: 0.1
+  min_lr: 5e-4
+
+  use_amp: false
+  freeze_encoder: false
+
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ['default']
+    lora_exclude_modules: null
+    lora_target_type: 'default'
+    lora_scope: 'transformer'
+    lora_lr_scale: 1.0
+
+logging:
+  experiment_name: "eegnet_adhd_fold4"
+  run_dir: "assets/run"
+  use_cloud: true
+  cloud_backend: "wandb"
+  project: "eegnet_adhd_fold4"
+  offline: false
+  tags: ['eegnet', 'adhd', 'full', 'fold4', 'kfold']
+  log_step_interval: 2
+  ckpt_interval: 1

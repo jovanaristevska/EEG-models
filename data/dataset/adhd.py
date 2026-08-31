@@ -32,6 +32,10 @@ from data.processor.builder import EEGConfig, EEGDatasetBuilder
 
 logger = logging.getLogger('preproc')
 
+# Number of subject-level k-fold CV folds; also used by adhd_crown.py so both
+# datasets partition the same 121 shared subjects into matching folds.
+ADHD_N_FOLDS = 5
+
 
 # ===========================================================================
 # CONFIGURATION
@@ -133,6 +137,15 @@ class ADHDBuilder(EEGDatasetBuilder):
     BUILDER_CONFIGS = [
         BUILDER_CONFIG_CLASS(name='pretrain'),
         BUILDER_CONFIG_CLASS(name='finetune', is_finetune=True, wnd_div_sec=4),
+    ] + [
+        # NOTE: uses ADHDConfig directly, not BUILDER_CONFIG_CLASS -- a class-body
+        # comprehension's per-item expression can't see other class attributes,
+        # only true module-level names (this bit me once already for ADHD_N_FOLDS).
+        ADHDConfig(
+            name=f'finetune_fold{i}', is_finetune=True, wnd_div_sec=4,
+            n_folds=ADHD_N_FOLDS, fold_idx=i,
+        )
+        for i in range(ADHD_N_FOLDS)
     ]
 
     def __init__(self, config_name='pretrain', **kwargs):
@@ -345,11 +358,14 @@ class ADHDBuilder(EEGDatasetBuilder):
     # ------------------------------------------------------------------
     def _divide_split(self, df: DataFrame) -> DataFrame:
         if self.config.is_finetune:
-            # All three splits for finetune: train, valid, test
-            df = self._divide_label_balance_all_split(df)
+            if self.config.n_folds and self.config.n_folds > 0:
+                df = self._divide_kfold_split(df)
+            else:
+                # All three splits for finetune: train, valid, test
+                df = self._divide_label_balance_all_split(df)
         else:
             # Pretrain only needs train and valid (no test set needed)
-            df = self._divide_label_balance_all_split(df, splits=['train', 'valid'])
+            df = self._divide_label_balance_all_split(df, splits_name=['train', 'valid'])
         return df
 
     # ------------------------------------------------------------------

@@ -176,8 +176,9 @@ class ClassicalTrainer(AbstractTrainer, ABC):
                 loss_tensor = loss.clone().detach()
                 acc_tensor = step_acc.clone().detach()
 
-                torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.AVG)
-                torch.distributed.all_reduce(acc_tensor, op=torch.distributed.ReduceOp.AVG)
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.AVG)
+                    torch.distributed.all_reduce(acc_tensor, op=torch.distributed.ReduceOp.AVG)
 
                 if get_is_master():
                     log_data = {

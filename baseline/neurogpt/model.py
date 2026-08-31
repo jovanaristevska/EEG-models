@@ -16,12 +16,34 @@ logger = logging.getLogger('baseline')
 # ── EEGConformer Encoder ──────────────────────────────────────────────────────
 
 class _PatchEmbedding(nn.Module):
-    def __init__(self, n_filters_time, filter_time_length, n_channels,
-                 pool_time_length, stride_avg_pool, drop_prob):
+    def __init__(self, n_filters_time, filter_time_length,
+                 pool_time_length, stride_avg_pool, drop_prob, num_std_channels):
         super().__init__()
+        # Kept as a 1-element Sequential named `shallownet` so its state-dict key
+        # (`shallownet.0.*`) matches the pretrained NeuroGPT checkpoint exactly.
+        # This is the temporal-only conv — its kernel spans time only, not channels,
+        # so it's channel-count-independent and genuinely transfers from pretraining
+        # for every montage.
         self.shallownet = nn.Sequential(
             nn.Conv2d(1, n_filters_time, (1, filter_time_length), (1, 1)),
-            nn.Conv2d(n_filters_time, n_filters_time, (n_channels, 1), (1, 1)),
+        )
+
+        # Channel-count-agnostic replacement for the old (n_channels, 1) spatial conv.
+        # That conv's kernel spanned the full channel dimension, so its weight shape
+        # depended on n_channels — meaning it could never load pretrained weights for
+        # any dataset in this benchmark, since none match the checkpoint's native 22
+        # channels (19/14/8 all mismatch), and was silently reinitialized every run.
+        # Instead: a learned per-channel identity embedding (keyed by a canonical
+        # channel index, same approach as EEGPT's chan_embed) injects "which electrode
+        # is this" information, and `spatial_conv` is a 1x1 conv applied identically to
+        # every channel — its weight shape no longer depends on how many channels the
+        # input has, so this component is architecturally consistent (if not literally
+        # pretrained-loadable, since the checkpoint never had this shape either) across
+        # every montage.
+        self.chan_embed = nn.Embedding(num_std_channels, n_filters_time)
+        self.spatial_conv = nn.Conv2d(n_filters_time, n_filters_time, (1, 1), (1, 1))
+
+        self.post_spatial = nn.Sequential(
             nn.BatchNorm2d(num_features=n_filters_time),
             nn.ELU(),
             nn.AvgPool2d(kernel_size=(1, pool_time_length), stride=(1, stride_avg_pool)),
@@ -32,8 +54,22 @@ class _PatchEmbedding(nn.Module):
             Rearrange("b d_model 1 seq -> b seq d_model"),
         )
 
-    def forward(self, x):
-        x = self.shallownet(x)
+    def forward(self, x, chan_ids=None):
+        x = self.shallownet(x)  # (B, F, n_chans, T') — temporal-only
+
+        n_chans = x.shape[2]
+        if chan_ids is None:
+            chan_ids = torch.arange(n_chans, device=x.device)
+        chan_ids = chan_ids.to(x.device).long()
+
+        embed = self.chan_embed(chan_ids)              # (n_chans, F)
+        embed = embed.t().unsqueeze(0).unsqueeze(-1)    # (1, F, n_chans, 1)
+        x = x + embed
+
+        x = self.spatial_conv(x)            # (B, F, n_chans, T'), channel-shared weights
+        x = x.mean(dim=2, keepdim=True)     # (B, F, 1, T') — collapse the channel dimension
+
+        x = self.post_spatial(x)
         x = self.projection(x)
         return x
 
@@ -114,15 +150,16 @@ class EEGConformerEncoder(nn.Module):
     def __init__(self, n_chans, n_times, n_filters_time=40,
                  filter_time_length=25, pool_time_length=75,
                  pool_time_stride=15, drop_prob=0.5,
-                 att_depth=6, att_heads=10, att_drop_prob=0.5):
+                 att_depth=6, att_heads=10, att_drop_prob=0.5,
+                 num_std_channels=63):
         super().__init__()
         self.patch_embedding = _PatchEmbedding(
             n_filters_time=n_filters_time,
             filter_time_length=filter_time_length,
-            n_channels=n_chans,
             pool_time_length=pool_time_length,
             stride_avg_pool=pool_time_stride,
             drop_prob=drop_prob,
+            num_std_channels=num_std_channels,
         )
         self.transformer = _TransformerEncoder(
             att_depth=att_depth,
@@ -131,11 +168,11 @@ class EEGConformerEncoder(nn.Module):
             att_drop=att_drop_prob,
         )
 
-    def forward(self, x):
+    def forward(self, x, chan_ids=None):
         # x: (batch*chunks, channels, time)
-        x = x.unsqueeze(1)           # (B*C, 1, chans, time)
-        x = self.patch_embedding(x)  # (B*C, seq, emb)
-        x = self.transformer(x)      # (B*C, seq, emb)
+        x = x.unsqueeze(1)                     # (B*C, 1, chans, time)
+        x = self.patch_embedding(x, chan_ids)  # (B*C, seq, emb)
+        x = self.transformer(x)                # (B*C, seq, emb)
         return x
 
 
@@ -205,6 +242,7 @@ class NeuroGPTModel(nn.Module):
         num_chunks: int = 2,
         chunk_len: int = 512,
         ft_only_encoder: bool = True,
+        num_std_channels: int = 63,
     ):
         super().__init__()
         self.ds_name = ds_name
@@ -224,6 +262,7 @@ class NeuroGPTModel(nn.Module):
             att_depth=num_encoder_layers,
             att_heads=att_heads,
             att_drop_prob=att_drop_prob,
+            num_std_channels=num_std_channels,
         )
 
         # Calculate encoder output dim
@@ -267,24 +306,44 @@ class NeuroGPTModel(nn.Module):
         import warnings
         pretrained = torch.load(pretrained_path, map_location='cpu', weights_only=False)
         current = self.state_dict()
-        
+
+        # Key remap: the checkpoint's BatchNorm was originally at shallownet.2.*
+        # (part of the old fused shallownet Sequential). After splitting the channel
+        # mixing out into its own channel-agnostic module, that BatchNorm now lives at
+        # post_spatial.0.* — but its own shape never depended on channel count either
+        # way (num_features=n_filters_time, fixed at 40), so this is a safe,
+        # shape-preserving rename, not a real architecture change, and should keep
+        # loading exactly as it did before the channel-mixing fix.
+        key_remap = {
+            f'encoder.patch_embedding.shallownet.2.{suffix}':
+                f'encoder.patch_embedding.post_spatial.0.{suffix}'
+            for suffix in ('weight', 'bias', 'running_mean', 'running_var', 'num_batches_tracked')
+        }
+
         # Filter only matching keys with matching shapes
         filtered = {}
         for k, v in pretrained.items():
-            if k in current:
-                if current[k].shape == v.shape:
-                    filtered[k] = v
+            k_mapped = key_remap.get(k, k)
+            if k_mapped in current:
+                if current[k_mapped].shape == v.shape:
+                    filtered[k_mapped] = v
                 else:
-                    warnings.warn(f'Shape mismatch for {k}: {v.shape} vs {current[k].shape} — skipping')
+                    warnings.warn(f'Shape mismatch for {k} -> {k_mapped}: {v.shape} vs {current[k_mapped].shape} — skipping')
             else:
                 warnings.warn(f'Skipping {k} — not in current model')
-        
+
         self.load_state_dict(filtered, strict=False)
         logger.info(f"Loaded {len(filtered)}/{len(pretrained)} pretrained weights from {pretrained_path}")
 
     def forward(self, batch):
         x = batch['data']           # (B, n_chans, T)
         montage = batch.get('montage', ['adhd/10_20'])[0]
+        # `chans_id` is produced per-sample by the adapter (canonical channel index per
+        # electrode) and is uniform across a batch, since batches are grouped by
+        # dataset/montage — take one copy and let the encoder broadcast it.
+        chans_id = batch.get('chans_id', None)
+        if chans_id is not None:
+            chans_id = chans_id[0]
         B, C, T = x.shape
 
         # Split into chunks: (B, num_chunks, n_chans, chunk_len)
@@ -297,7 +356,7 @@ class NeuroGPTModel(nn.Module):
         B_chunks = B * self.num_chunks
         #x_chunks = chunks.view(B_chunks, C, T // self.num_chunks)
         x_chunks = chunks.view(B_chunks, C, self.chunk_len)
-        enc_out = self.encoder(x_chunks)        # (B*num_chunks, seq, emb)
+        enc_out = self.encoder(x_chunks, chan_ids=chans_id)        # (B*num_chunks, seq, emb)
         enc_flat = enc_out.reshape(B_chunks, -1)   # (B*num_chunks, seq*emb)
 
         if self.ft_only_encoder:

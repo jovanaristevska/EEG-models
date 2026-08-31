@@ -105,8 +105,15 @@ class AbstractDatasetAdapter(Dataset, ABC):
             
         # Apply channel selection using boolean indexing
         selector = torch.tensor(montage_info['sel'], dtype=torch.bool)
-        data_mapped = data[selector, :] * self.scale
-        
+        data_mapped = data[selector, :]
+
+        # Shared per-channel, per-window normalization — replaces the old model-specific
+        # `self.scale` multiplier so every model sees inputs on the same scale, computed
+        # independently per window (no cross-split statistics, no leakage).
+        mean = data_mapped.mean(dim=-1, keepdim=True)
+        std = data_mapped.std(dim=-1, keepdim=True)
+        data_mapped = (data_mapped - mean) / (std + 1e-6)
+
         # Apply model-specific data processing
         data_processed = self._apply_model_specific_processing(data_mapped, montage_info)
         
@@ -124,6 +131,7 @@ class AbstractDatasetAdapter(Dataset, ABC):
             'chans_id': chans_id,
             'task': task,
             'label': sample['label'],
+            'subject': sample['subject'],
         }
         
         return result

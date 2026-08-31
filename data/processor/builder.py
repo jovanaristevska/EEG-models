@@ -51,6 +51,11 @@ class EEGConfig(BuilderConfig):
     fs: float = 256.0
     unit: str = "uV"
 
+    # subject-level k-fold cross-validation split, opt-in per dataset builder.
+    # n_folds=0 (default) disables k-fold and keeps the standard single split.
+    n_folds: int = 0
+    fold_idx: int = 0
+
     # middle cache storage
     mid_batch_size: int = 1e3
     mid_storage_format: str = 'parquet'
@@ -457,6 +462,7 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
         try:
             with self._read_raw_data(path, preload=True, verbose=False) as data:
                 data = self._select_data_channels(data, path, montage)
+                data = self._detect_and_interpolate_bad_channels(data)
                 data = self._resample_and_filter(data)
                 raw = self._fetch_signal_ndarray(data)
                 chs_idx = self._fetch_chs_index(montage)
@@ -767,6 +773,56 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
             raise RuntimeError(f'Failed to reorder desired channels: {file_path}')
         return data
 
+    def _detect_and_interpolate_bad_channels(self, data: BaseRaw) -> BaseRaw:
+        """Flag flatline/abnormal-variance channels and spline-interpolate them.
+
+        Channel-count-agnostic (works identically regardless of montage size), and
+        reuses the same MNE spherical-spline interpolation already validated in this
+        repo for the Crown montage (crown_dataset_builder.py / validate_interpolation.py),
+        rather than a new, unvalidated method. Requires channel positions already set
+        on `data` (true for every in-scope dataset's `_read_raw_data`).
+        """
+        signal = data.get_data()
+        variances = signal.var(axis=1)
+
+        bads: list[str] = []
+
+        # Flatline: near-zero variance — almost certainly a disconnected electrode.
+        flatline_mask = variances < 1e-20
+        bads.extend(data.ch_names[i] for i in np.where(flatline_mask)[0])
+
+        # Outlier: robust z-score (MAD-based) of a channel's variance relative to
+        # the other channels in the same recording — likely noisy/bad contact.
+        median_var = np.median(variances)
+        mad = np.median(np.abs(variances - median_var))
+        if mad > 0:
+            robust_z = 0.6745 * (variances - median_var) / mad
+            outlier_mask = np.abs(robust_z) > 4
+            bads.extend(
+                data.ch_names[i] for i in np.where(outlier_mask)[0]
+                if data.ch_names[i] not in bads
+            )
+
+        if not bads:
+            return data
+
+        bad_frac = len(bads) / len(data.ch_names)
+        if bad_frac > 0.25:
+            # Too corrupted to safely interpolate — raise so the caller's existing
+            # per-file try/except drops this recording instead of manufacturing
+            # signal for a majority-bad channel set.
+            raise RuntimeError(
+                f"{len(bads)}/{len(data.ch_names)} channels flagged bad "
+                f"({bad_frac:.0%}), exceeding the 25% interpolation cap: {bads}"
+            )
+
+        data.info['bads'] = bads
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            data.interpolate_bads(reset_bads=True, method='spline', verbose=False)
+        logger.info(f"Interpolated {len(bads)} bad channel(s): {bads}")
+        return data
+
     def _resample_and_filter(self, data: BaseRaw):
         orig_fs = data.info['sfreq']
         # mne lowpass and high pass in raw info are unreliable
@@ -909,10 +965,13 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
             info = info + f" | {dist[j]:<8.2%}"
         logger.info(info)
 
-    def _multi_label_iterative_stratified_split(self, df: DataFrame, splits_name: list[str]) -> DataFrame:
-        if not self.config.is_finetune:
-            logger.warning('Multi-label iterative stratified split should only be available for finetune')
-        # simplifies x, y structure
+    def _compute_subject_label_weights(self, df: DataFrame) -> tuple[ndarray, ndarray]:
+        """Compute, per unique subject, a window-count-weighted label distribution.
+
+        Returns (unique_subjects, y_weighted) where y_weighted[i] gives the weighted
+        label counts for unique_subjects[i]. Shared by the standard ratio-based split
+        and the k-fold split, so both partition subjects using the same label weights.
+        """
         subjects = df['subject'].tolist()
         labels = df['label'].tolist()
         times = df['time'].tolist()
@@ -946,6 +1005,14 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
             weight = np.bincount(np.array(label), weights=np.array(wnd, dtype=np.int64), minlength=len(self.config.category))
             y_weighted[idx] += weight.astype(np.int64)
 
+        return unique_subjects, y_weighted
+
+    def _multi_label_iterative_stratified_split(self, df: DataFrame, splits_name: list[str]) -> DataFrame:
+        if not self.config.is_finetune:
+            logger.warning('Multi-label iterative stratified split should only be available for finetune')
+
+        unique_subjects, y_weighted = self._compute_subject_label_weights(df)
+
         ratios: ndarray = np.array([1 - self.config.valid_ratio - self.config.test_ratio,
                            self.config.valid_ratio, self.config.test_ratio], dtype=np.float32)
         split_mask = np.array([split in splits_name for split in self.split_corr], dtype=bool)
@@ -955,6 +1022,64 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
 
         for split, indices in zip(splits_name, split_indices):
             df.loc[df['subject'].isin(unique_subjects[indices]), 'split'] = split
+        return df
+
+    def _divide_kfold_split(self, df: DataFrame, splits_name: list[str] = None) -> DataFrame:
+        """Subject-level, label-balanced k-fold split.
+
+        Partitions all subjects into `self.config.n_folds` label-balanced groups
+        (reusing the same greedy balancer as the standard split, with equal ratios
+        instead of train/valid/test ratios). `self.config.fold_idx`'s group becomes
+        the test set; the remaining subjects are split into train/valid preserving
+        the same relative proportion as the standard single split.
+
+        Deterministic given the same subject/label data, so calling this from two
+        dataset builders that share the same underlying subjects (e.g. ADHD-19 and
+        its Crown-interpolated counterpart) produces matching fold assignments —
+        no cross-dataset coordination needed, same as the existing single-split path.
+        """
+        if splits_name is None:
+            splits_name = ['train', 'valid', 'test']
+
+        n_folds = self.config.n_folds
+        fold_idx = self.config.fold_idx
+        if not (0 <= fold_idx < n_folds):
+            raise ValueError(f'fold_idx {fold_idx} must be in [0, {n_folds})')
+
+        unique_subjects, y_weighted = self._compute_subject_label_weights(df)
+
+        fold_groups = self._iterative_greedy_split(y_weighted, ratios=np.ones(n_folds))
+        test_indices = fold_groups[fold_idx]
+
+        remaining_indices = np.concatenate([
+            g for i, g in enumerate(fold_groups) if i != fold_idx
+        ])
+
+        # Split the non-test subjects into train/valid, preserving the same relative
+        # train:valid proportion the standard single split uses.
+        remaining_y_weighted = y_weighted[remaining_indices]
+        inner_ratios = np.array([
+            1 - self.config.valid_ratio - self.config.test_ratio,
+            self.config.valid_ratio,
+        ], dtype=np.float32)
+        train_rel, valid_rel = self._iterative_greedy_split(remaining_y_weighted, ratios=inner_ratios)
+        train_indices = remaining_indices[train_rel]
+        valid_indices = remaining_indices[valid_rel]
+
+        split_indices = {'train': train_indices, 'valid': valid_indices, 'test': test_indices}
+        self._analyze_split(
+            y_weighted,
+            [split_indices[s] for s in splits_name],
+            splits_name,
+        )
+
+        for split in splits_name:
+            df.loc[df['subject'].isin(unique_subjects[split_indices[split]]), 'split'] = split
+
+        logger.info(
+            f"K-fold split: fold {fold_idx}/{n_folds} — "
+            f"train={len(train_indices)}, valid={len(valid_indices)}, test={len(test_indices)} subjects"
+        )
         return df
 
     def _divide_label_balance_all_split(

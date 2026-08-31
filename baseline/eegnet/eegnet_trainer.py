@@ -6,12 +6,25 @@ from torch import nn
 import braindecode.models
 from datasets import Dataset as HFDataset
 
-from baseline.abstract.adapter import AbstractDataLoaderFactory
+from baseline.abstract.adapter import AbstractDataLoaderFactory, AbstractDatasetAdapter, StandardEEGChannelsMixin
 from baseline.abstract.classical import ClassicalTrainer
 from baseline.eegnet.eegnet_config import EegNetConfig
 
 
 logger = logging.getLogger('baseline')
+
+
+class EegNetDatasetAdapter(AbstractDatasetAdapter, StandardEEGChannelsMixin):
+    """EEGNet dataset adapter — routes EEGNet through the same shared channel
+    selection and normalization as EEGPT/NeuroGPT, instead of the raw pass-through
+    it used before (which meant EEGNet got no channel mapping and no normalization)."""
+
+    def _setup_adapter(self):
+        self.model_name = 'eegnet'
+        super()._setup_adapter()
+
+    def get_supported_channels(self) -> List[str]:
+        return self.get_standard_eeg_channels()
 
 
 class EegNetDataLoaderFactory(AbstractDataLoaderFactory):
@@ -20,8 +33,8 @@ class EegNetDataLoaderFactory(AbstractDataLoaderFactory):
         dataset: HFDataset,
         dataset_names: List[str],
         dataset_configs: List[str]
-    ) -> HFDataset:
-        return dataset
+    ) -> EegNetDatasetAdapter:
+        return EegNetDatasetAdapter(dataset, dataset_names, dataset_configs)
 
 
 class EegNetModel(nn.Module):
@@ -61,9 +74,7 @@ class EegNetTrainer(ClassicalTrainer):
         model = EegNetModel(self.encoder)
         model = model.to(self.device)
 
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[self.local_rank], find_unused_parameters=True
-        )
+        model = self.maybe_wrap_ddp(model, find_unused_parameters=True)
         logger.info(f"Model setup complete for {list(self.ds_info.keys())}")
 
         self.model = model

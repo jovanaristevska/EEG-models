@@ -2,15 +2,18 @@
 Abstract trainer base class for baseline models.
 """
 import datetime
+import json
 import os
 import logging
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import comet_ml
 import datasets
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -117,6 +120,19 @@ class AbstractTrainer(ABC):
 
         # Lazy-created pretrain reconstruction head (registered on model)
         self._pretrain_recon_head = None
+
+        # Per-dataset classification thresholds, calibrated on the validation split each epoch
+        self.val_thresholds: Dict[str, float] = {}
+
+        # Most recently computed metrics per eval prefix ('eval'/'test'), and a snapshot
+        # of the test metrics from the best-val-AUROC epoch — persisted at the end of
+        # training so a separate script can aggregate results (e.g. mean +/- CI) across
+        # multiple runs of the same config (different k-fold folds, different seeds).
+        self.last_eval_metrics: Dict[str, Dict[str, float]] = {}
+        self.best_test_metrics: Dict[str, Dict[str, float]] = {}
+
+        # Per-dataset classification thresholds, calibrated on the validation split
+        self.val_thresholds: Dict[str, float] = {}
     
     def setup_distributed(self):
         """Setup distributed training environment."""
@@ -462,6 +478,23 @@ class AbstractTrainer(ABC):
         except Exception as e:
             logger.warning(f"Failed to log to comet.ml: {e}")
 
+    def _find_optimal_threshold(self, label_np: np.ndarray, probs: np.ndarray) -> float:
+        """Grid-search the decision threshold that maximizes balanced accuracy (~Youden's J)."""
+        if len(np.unique(label_np)) < 2:
+            return 0.5
+
+        candidates = np.linspace(0.01, 0.99, 99)
+        best_threshold = 0.5
+        best_score = -1.0
+        for threshold in candidates:
+            pred = (probs >= threshold).astype(int)
+            score = balanced_accuracy_score(label_np, pred)
+            if score > best_score:
+                best_score = score
+                best_threshold = float(threshold)
+
+        return best_threshold
+
     def _calculate_metrics_for_dataset(
             self,
             labels: torch.Tensor,
@@ -469,16 +502,32 @@ class AbstractTrainer(ABC):
             ds_name: str,
             prefix: str,
             loss: float,
+            subjects: Optional[List[str]] = None,
     ) -> Dict[str, float]:
         label_np = labels.numpy()
-        pred_np = torch.argmax(logits, dim=-1).numpy()
-
         n_class = self.ds_info[ds_name]['n_class']
 
         metrics = {
             f'{ds_name}/{prefix}/epoch': self.epoch,
             f'{ds_name}/{prefix}/loss': loss,
         }
+
+        threshold = 0.5
+        if n_class == 2:
+            # Binary classification: calibrate the decision threshold on the validation
+            # split each epoch, then reuse it for test — instead of a fixed argmax/0.5 cut.
+            probs = torch.softmax(logits, dim=1)[:, 1].numpy()
+
+            if prefix == 'eval':
+                threshold = self._find_optimal_threshold(label_np, probs)
+                self.val_thresholds[ds_name] = threshold
+            else:
+                threshold = self.val_thresholds.get(ds_name, 0.5)
+
+            pred_np = (probs >= threshold).astype(int)
+            metrics[f'{ds_name}/{prefix}/threshold'] = float(threshold)
+        else:
+            pred_np = torch.argmax(logits, dim=-1).numpy()
 
         # Basic accuracy
         # noinspection PyUnresolvedReferences
@@ -490,9 +539,6 @@ class AbstractTrainer(ABC):
         metrics[f'{ds_name}/{prefix}/balanced_acc'] = float(balanced_acc)
 
         if n_class == 2:
-            # Binary classification metrics
-            probs = torch.softmax(logits, dim=1)[:, 1].numpy()
-
             try:
                 auroc = roc_auc_score(label_np, probs)
                 metrics[f'{ds_name}/{prefix}/auroc'] = float(auroc)
@@ -506,6 +552,46 @@ class AbstractTrainer(ABC):
             except ValueError as e:
                 logger.warning(f'Error calculating AUC-PR for {ds_name} {prefix}: {e}')
                 metrics[f'{ds_name}/{prefix}/auc_pr'] = 0.0
+
+            # Subject-level metrics: average each subject's window-level probabilities
+            # into a single prediction before scoring, instead of treating every window
+            # as an independent test case.
+            if subjects is not None and len(subjects) == len(label_np):
+                subject_probs = defaultdict(list)
+                subject_label = {}
+                for i, subj in enumerate(subjects):
+                    subject_probs[subj].append(probs[i])
+                    subject_label[subj] = label_np[i]
+
+                subj_ids = list(subject_probs.keys())
+                subj_probs_agg = np.array([np.mean(subject_probs[s]) for s in subj_ids])
+                subj_label_agg = np.array([subject_label[s] for s in subj_ids])
+                subj_pred_agg = (subj_probs_agg >= threshold).astype(int)
+
+                metrics[f'{ds_name}/{prefix}/subject_count'] = float(len(subj_ids))
+
+                subj_acc = (subj_pred_agg == subj_label_agg).mean()
+                metrics[f'{ds_name}/{prefix}/subject_acc'] = float(subj_acc)
+
+                try:
+                    subj_balanced_acc = balanced_accuracy_score(subj_label_agg, subj_pred_agg)
+                    metrics[f'{ds_name}/{prefix}/subject_balanced_acc'] = float(subj_balanced_acc)
+                except ValueError as e:
+                    logger.warning(f'Error calculating subject-level balanced accuracy for {ds_name} {prefix}: {e}')
+
+                try:
+                    subj_auroc = roc_auc_score(subj_label_agg, subj_probs_agg)
+                    metrics[f'{ds_name}/{prefix}/subject_auroc'] = float(subj_auroc)
+                except ValueError as e:
+                    logger.warning(f'Error calculating subject-level AUROC for {ds_name} {prefix}: {e}')
+                    metrics[f'{ds_name}/{prefix}/subject_auroc'] = 0.0
+
+                try:
+                    subj_auc_pr = average_precision_score(subj_label_agg, subj_probs_agg)
+                    metrics[f'{ds_name}/{prefix}/subject_auc_pr'] = float(subj_auc_pr)
+                except ValueError as e:
+                    logger.warning(f'Error calculating subject-level AUC-PR for {ds_name} {prefix}: {e}')
+                    metrics[f'{ds_name}/{prefix}/subject_auc_pr'] = 0.0
         else:
             # Multi-class classification metrics
             cohen_kappa = cohen_kappa_score(label_np, pred_np)
@@ -576,6 +662,22 @@ class AbstractTrainer(ABC):
             all_target = torch.cat(target_list, dim=0)
             return all_logits.cpu(), all_target.cpu()
         return None, None
+
+    def _gather_object_list(self, objects: list) -> Optional[list]:
+        """Gather a list of picklable Python objects (e.g. subject-id strings) onto the master rank."""
+        is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if not is_dist:
+            return objects
+
+        gathered: list[Optional[list]] = [None] * self.world_size if get_is_master() else None
+        torch.distributed.gather_object(objects, gathered, dst=0)
+
+        if get_is_master():
+            flattened = []
+            for chunk in gathered:
+                flattened.extend(chunk)
+            return flattened
+        return None
 
     @staticmethod
     def _calc_confusion_matrix(pred: Tensor, target: Tensor, n_class: int) -> Tensor:
@@ -1224,6 +1326,7 @@ class AbstractTrainer(ABC):
                 'cnt': torch.zeros(1, dtype=torch.int64, device=self.device),
                 'logits': [],
                 'labels': [],
+                'subjects': [],
             }
 
         with torch.no_grad():
@@ -1247,9 +1350,11 @@ class AbstractTrainer(ABC):
                     overall_metrics[ds_name]['cm'] += cm.detach()
 
                     logits_across, labels_across = self._gather_result(logits.detach(), labels.detach())
+                    subjects_across = self._gather_object_list(list(batch['subject']))
                     if get_is_master():
                         overall_metrics[ds_name]['logits'].append(logits_across.cpu())
                         overall_metrics[ds_name]['labels'].append(labels_across.cpu())
+                        overall_metrics[ds_name]['subjects'].extend(subjects_across)
 
                 
                 if is_dist:
@@ -1271,13 +1376,15 @@ class AbstractTrainer(ABC):
                 if get_is_master():
                     labels_all = torch.concat(overall_metrics[ds_name]['labels'], dim=0)
                     logits_all = torch.concat(overall_metrics[ds_name]['logits'], dim=0)
+                    subjects_all = overall_metrics[ds_name]['subjects']
                     loss_metric = overall_metrics[ds_name]['loss'].detach().cpu().item()
                     metrics = self._calculate_metrics_for_dataset(
                         labels=labels_all,
                         logits=logits_all,
                         ds_name=ds_name,
                         prefix=prefix,
-                        loss=loss_metric
+                        loss=loss_metric,
+                        subjects=subjects_all,
                     )
 
                     log_dict = log_dict | metrics
@@ -1287,6 +1394,9 @@ class AbstractTrainer(ABC):
             if get_is_master() and self.cfg.logging.use_cloud:
                 log_cloud = self._create_ft_cloud_log_data(log_dict, prefix, overall_metrics)
                 self._log_to_cloud(log_cloud)
+
+            if get_is_master():
+                self.last_eval_metrics[prefix] = log_dict
 
             if is_dist:
                 if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -1324,6 +1434,33 @@ class AbstractTrainer(ABC):
         
         logger.info("LoRA checkpoint loaded successfully")
     
+    def _save_best_test_metrics(self, ds_name: str):
+        """Persist the test metrics from the best-val-AUROC epoch to a local JSON file.
+
+        Lets a separate aggregation script combine results across multiple runs of the
+        same config (k-fold folds, seed variants) into mean +/- confidence intervals,
+        without depending on cloud logging (wandb/comet) being queried after the fact.
+        """
+        if not get_is_master() or ds_name not in self.best_test_metrics:
+            return
+
+        summary = {
+            'ds_name': ds_name,
+            'experiment_name': self.cfg.logging.experiment_name,
+            'seed': self.cfg.seed,
+            # e.g. 'finetune_fold2' — aggregation script parses the fold index from this
+            'dataset_config': self.cfg.data.datasets.get(ds_name),
+            'best_epoch': self.epoch,
+            'metrics': self.best_test_metrics[ds_name],
+        }
+
+        out_dir = Path(self.log_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f'best_test_metrics_{ds_name}.json'
+        with open(out_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        logger.info(f"Saved best-epoch test metrics for {ds_name} to {out_path}")
+
     def save_checkpoint(self, ds_name: Optional[str] = None, is_milestone: bool = False, **kwargs):
         """Save checkpoint with unified path management."""
         if not get_is_master():
@@ -1477,10 +1614,12 @@ class AbstractTrainer(ABC):
                     patience_counter = 0
                     logger.info(f"New best val AUROC: {best_auroc:.4f} at epoch {epoch}")
                     self.save_checkpoint()
+                    for ds_key in self.ds_info.keys():
+                        self.best_test_metrics[ds_key] = dict(self.last_eval_metrics.get('test', {}))
                 else:
                     patience_counter += 1
                     logger.info(f"No improvement. Patience: {patience_counter}/{early_stopping_patience}")
-        
+
             # Broadcast early stopping decision
             should_stop = torch.tensor(
                 1 if (get_is_master() and patience_counter >= early_stopping_patience) else 0,
@@ -1488,7 +1627,7 @@ class AbstractTrainer(ABC):
             )
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 torch.distributed.broadcast(should_stop, src=0)
-        
+
             if should_stop.item() == 1:
                 logger.info(f"Early stopping at epoch {epoch}!")
                 break
@@ -1500,6 +1639,9 @@ class AbstractTrainer(ABC):
 
 
         self.save_checkpoint(is_milestone=True)
+
+        for ds_key in self.ds_info.keys():
+            self._save_best_test_metrics(ds_key)
 
         self.finish_cloud_logging()
         clean_torch_distributed(self.local_rank)
@@ -1574,6 +1716,7 @@ class AbstractTrainer(ABC):
                         patience_counter = 0
                         logger.info(f"New best val AUROC: {best_auroc:.4f} at epoch {epoch}")
                         self.save_checkpoint(ds_name=ds_name)
+                        self.best_test_metrics[ds_name] = dict(self.last_eval_metrics.get('test', {}))
                     else:
                         patience_counter += 1
                         logger.info(f"No improvement. Patience: {patience_counter}/{early_stopping_patience}")
@@ -1595,6 +1738,7 @@ class AbstractTrainer(ABC):
                     self.save_checkpoint(ds_name=ds_name)
 
             self.save_checkpoint(ds_name, is_milestone=True)
+            self._save_best_test_metrics(ds_name)
             logger.info(f"Training completed for {ds_name}!")
 
             self.epoch = 0

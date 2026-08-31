@@ -25,6 +25,7 @@ from pandas import DataFrame
 
 from common.type import DatasetTaskType
 from data.processor.builder import EEGConfig, EEGDatasetBuilder
+from data.dataset.adhd import ADHD_N_FOLDS
 
 logger = logging.getLogger('preproc')
 
@@ -125,6 +126,17 @@ class ADHDCrownBuilder(EEGDatasetBuilder):
     BUILDER_CONFIGS = [
         BUILDER_CONFIG_CLASS(name='pretrain'),
         BUILDER_CONFIG_CLASS(name='finetune', is_finetune=True, wnd_div_sec=4),
+    ] + [
+        # Same fold count/index as adhd.py's finetune_foldN — since both datasets
+        # share the same 121 subjects/labels and the split algorithm is deterministic,
+        # this produces matching fold assignments across the 19ch/8ch montages.
+        # NOTE: uses ADHDCrownConfig directly, not BUILDER_CONFIG_CLASS -- a class-body
+        # comprehension's per-item expression can't see other class attributes.
+        ADHDCrownConfig(
+            name=f'finetune_fold{i}', is_finetune=True, wnd_div_sec=4,
+            n_folds=ADHD_N_FOLDS, fold_idx=i,
+        )
+        for i in range(ADHD_N_FOLDS)
     ]
 
     def __init__(self, config_name='pretrain', **kwargs):
@@ -250,9 +262,12 @@ class ADHDCrownBuilder(EEGDatasetBuilder):
     # ------------------------------------------------------------------
     def _divide_split(self, df: DataFrame) -> DataFrame:
         if self.config.is_finetune:
-            df = self._divide_label_balance_all_split(df)
+            if self.config.n_folds and self.config.n_folds > 0:
+                df = self._divide_kfold_split(df)
+            else:
+                df = self._divide_label_balance_all_split(df)
         else:
-            df = self._divide_label_balance_all_split(df, splits=['train', 'valid'])
+            df = self._divide_label_balance_all_split(df, splits_name=['train', 'valid'])
         return df
 
     # ------------------------------------------------------------------

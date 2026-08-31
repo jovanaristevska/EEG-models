@@ -16,7 +16,6 @@ class NeuroGPTDatasetAdapter(AbstractDatasetAdapter, StandardEEGChannelsMixin):
 
     def _setup_adapter(self):
         self.model_name = 'neurogpt'
-        self.scale = 0.001  # µV → mV
         super()._setup_adapter()
 
     def get_supported_channels(self) -> List[str]:
