@@ -1444,13 +1444,19 @@ class AbstractTrainer(ABC):
         if not get_is_master() or ds_name not in self.best_test_metrics:
             return
 
+        # `self.epoch` reflects wherever the training loop was when it stopped (e.g. the
+        # last epoch before early stopping), not necessarily the best epoch — read the
+        # true best epoch back out of the metrics dict itself, which was captured at the
+        # correct moment (inside the "new best val AUROC" block).
+        best_epoch = self.best_test_metrics[ds_name].get(f'{ds_name}/test/epoch', self.epoch)
+
         summary = {
             'ds_name': ds_name,
             'experiment_name': self.cfg.logging.experiment_name,
             'seed': self.cfg.seed,
             # e.g. 'finetune_fold2' — aggregation script parses the fold index from this
             'dataset_config': self.cfg.data.datasets.get(ds_name),
-            'best_epoch': self.epoch,
+            'best_epoch': best_epoch,
             'metrics': self.best_test_metrics[ds_name],
         }
 
