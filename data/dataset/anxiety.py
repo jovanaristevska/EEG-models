@@ -296,15 +296,23 @@ class AnxietyBuilder(EEGDatasetBuilder):
         """Leave-one-subject-out split, grouped by `original_subject` (person)
         rather than the per-trial `subject` id -- DASPS has ~12 trial rows per
         person (S01t01..S01t12), so `fold_idx` selects exactly one *person* as
-        the sole test subject; every other person's trials go to training.
+        the sole test subject; every other person's trials go to train/valid.
 
-        No held-out validation group is carved out of the remaining subjects
-        (DASPS is too small to spare more of them): the same training rows
-        are duplicated under 'valid' so the shared trainer's required
-        validation dataloader has data, paired with `early_stopping_patience`
-        set >= max_epochs in the training config so it never actually triggers
-        early stopping on this circular signal -- training always runs for
-        the fixed epoch budget, which is the point of this whole setup.
+        A genuine held-out validation group is carved out of the remaining
+        subjects (NOT duplicated training rows -- an earlier version of this
+        method used valid==train, which gives the shared trainer's per-epoch
+        "best val AUROC" checkpoint selection a circular signal: val AUROC
+        just tracks training-set fit and climbs toward 1.0 as the model
+        overfits, so with early stopping disabled it always ends up picking
+        the most-overfit epoch. Real validation data, paired with a normal
+        early_stopping_patience in the training config, is what actually
+        lets the trainer stop at a generalizing epoch.)
+
+        Reuses the shared label-balanced greedy splitter for the train/valid
+        carve-out, temporarily presenting `original_subject` as the 'subject'
+        column (same trick used by the fixed-split path), with the same
+        train:valid relative proportion `valid_ratio`/`test_ratio` imply for
+        the standard single split.
         """
         unique_subjects = sorted(df['original_subject'].unique())
         fold_idx = self.config.fold_idx
@@ -316,14 +324,29 @@ class AnxietyBuilder(EEGDatasetBuilder):
         test_subject = unique_subjects[fold_idx]
 
         df = df.copy()
-        df['split'] = np.where(df['original_subject'] == test_subject, 'test', 'train')
+        is_test = df['original_subject'] == test_subject
 
-        valid_rows = df.loc[df['split'] == 'train'].copy()
-        valid_rows['split'] = 'valid'
-        df = pd.concat([df, valid_rows], axis=0, ignore_index=True, sort=False)
+        remaining = df.loc[~is_test].copy()
+        remaining['subject'] = remaining['original_subject']
+        unique_remaining, y_weighted = self._compute_subject_label_weights(remaining)
+
+        inner_ratios = np.array([
+            1 - self.config.valid_ratio - self.config.test_ratio,
+            self.config.valid_ratio,
+        ], dtype=np.float32)
+        train_idx, valid_idx = self._iterative_greedy_split(y_weighted, ratios=inner_ratios)
+        train_subjects = set(unique_remaining[train_idx])
+        valid_subjects = set(unique_remaining[valid_idx])
+
+        df['split'] = 'test'
+        df.loc[df['original_subject'].isin(train_subjects), 'split'] = 'train'
+        df.loc[df['original_subject'].isin(valid_subjects), 'split'] = 'valid'
 
         df = df.drop(columns=['original_subject'])
-        print(f"LOSO fold {fold_idx}/{len(unique_subjects)}: test_subject={test_subject}")
+        print(
+            f"LOSO fold {fold_idx}/{len(unique_subjects)}: test_subject={test_subject}, "
+            f"train_subjects={len(train_subjects)}, valid_subjects={len(valid_subjects)}"
+        )
         return df
 
     def standardize_chs_names(self, montage: str):

@@ -4,11 +4,11 @@
 # LOSO split ('finetune_loso0' -- see data/dataset/anxiety.py) instead of the
 # fixed 70/15/15 subject split.
 #
-# LOSO has no held-out validation subject (DASPS is too small to spare more
-# of them): 'valid' is the same rows as 'train' (see _divide_loso_split), so
-# early_stopping_patience is set equal to max_epochs below -- it can never
-# trigger early stopping on that circular signal, and training always runs
-# the full fixed epoch budget.
+# The one held-out subject is the test set; the remaining 22 are further
+# split into a real train/valid group (see _divide_loso_split) so
+# early_stopping_patience below is a normal value, not disabled -- an earlier
+# version of this split reused 'train' rows as 'valid' too, which made "best
+# val AUROC" a circular signal that just tracked training-set overfitting.
 
 seed: 42
 master_port: 52200
@@ -61,7 +61,7 @@ model:
 
 training:
   max_epochs: 50
-  early_stopping_patience: 50   # == max_epochs: 'valid' == 'train' here, so this must never fire early
+  early_stopping_patience: 10   # normal value -- 'valid' is now a real held-out subject group
   weight_decay: 0.01
   max_grad_norm: 3.0
 
