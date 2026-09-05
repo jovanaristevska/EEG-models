@@ -29,6 +29,11 @@ from data.processor.builder import EEGConfig, EEGDatasetBuilder
 
 logger = logging.getLogger('preproc')
 
+# Leave-one-subject-out CV: one fold per DASPS person (23 original subjects,
+# ~12 trials each). fold_idx directly indexes the sorted list of subjects --
+# see _divide_loso_split.
+ANXIETY_N_LOSO_FOLDS = 23
+
 
 # ===========================================================================
 # CONFIGURATION
@@ -104,6 +109,15 @@ class AnxietyBuilder(EEGDatasetBuilder):
     BUILDER_CONFIGS = [
         BUILDER_CONFIG_CLASS(name='pretrain'),
         BUILDER_CONFIG_CLASS(name='finetune', is_finetune=True, wnd_div_sec=4),
+    ] + [
+        # NOTE: uses AnxietyConfig directly, not BUILDER_CONFIG_CLASS -- a class-body
+        # comprehension's per-item expression can't see other class attributes,
+        # only true module-level names.
+        AnxietyConfig(
+            name=f'finetune_loso{i}', is_finetune=True, wnd_div_sec=4,
+            n_folds=ANXIETY_N_LOSO_FOLDS, fold_idx=i,
+        )
+        for i in range(ANXIETY_N_LOSO_FOLDS)
     ]
 
     def __init__(self, config_name='finetune', **kwargs):
@@ -232,6 +246,13 @@ class AnxietyBuilder(EEGDatasetBuilder):
         df = df.copy()
         df['original_subject'] = df['subject'].astype(str).str[:3]
 
+        if self.config.n_folds and self.config.n_folds > 0:
+            print(f">>> Leave-one-subject-out split: fold {self.config.fold_idx}/{self.config.n_folds} <<<")
+            df = self._divide_loso_split(df)
+            print(f"Final split distribution:\n{df['split'].value_counts()}")
+            print("=" * 70 + "\n")
+            return df
+
         unique_subjects = sorted(df['original_subject'].unique())
         print(f"Found {len(unique_subjects)} unique original subjects")
 
@@ -269,6 +290,40 @@ class AnxietyBuilder(EEGDatasetBuilder):
         print(f"Final split distribution:\n{df['split'].value_counts()}")
         print("=" * 70 + "\n")
 
+        return df
+
+    def _divide_loso_split(self, df: DataFrame) -> DataFrame:
+        """Leave-one-subject-out split, grouped by `original_subject` (person)
+        rather than the per-trial `subject` id -- DASPS has ~12 trial rows per
+        person (S01t01..S01t12), so `fold_idx` selects exactly one *person* as
+        the sole test subject; every other person's trials go to training.
+
+        No held-out validation group is carved out of the remaining subjects
+        (DASPS is too small to spare more of them): the same training rows
+        are duplicated under 'valid' so the shared trainer's required
+        validation dataloader has data, paired with `early_stopping_patience`
+        set >= max_epochs in the training config so it never actually triggers
+        early stopping on this circular signal -- training always runs for
+        the fixed epoch budget, which is the point of this whole setup.
+        """
+        unique_subjects = sorted(df['original_subject'].unique())
+        fold_idx = self.config.fold_idx
+        if not (0 <= fold_idx < len(unique_subjects)):
+            raise ValueError(
+                f'fold_idx {fold_idx} must be in [0, {len(unique_subjects)}) '
+                f'for LOSO over {len(unique_subjects)} DASPS subjects'
+            )
+        test_subject = unique_subjects[fold_idx]
+
+        df = df.copy()
+        df['split'] = np.where(df['original_subject'] == test_subject, 'test', 'train')
+
+        valid_rows = df.loc[df['split'] == 'train'].copy()
+        valid_rows['split'] = 'valid'
+        df = pd.concat([df, valid_rows], axis=0, ignore_index=True, sort=False)
+
+        df = df.drop(columns=['original_subject'])
+        print(f"LOSO fold {fold_idx}/{len(unique_subjects)}: test_subject={test_subject}")
         return df
 
     def standardize_chs_names(self, montage: str):
