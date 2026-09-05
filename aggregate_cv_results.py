@@ -13,6 +13,12 @@ the `experiment_name` field saved inside each JSON file rather than by path.
 Usage:
     python aggregate_cv_results.py --prefix neurogpt_adhd_fold
     python aggregate_cv_results.py --prefix neurogpt_crown_scratch_fold --run_root assets/run
+
+    # experiment_name matching is prefix-based, so a name like 'eegpt_adhd_fold0_pretrained'
+    # also starts with 'eegpt_adhd_fold0' -- use --exclude/--suffix to disambiguate
+    # variants that share a common prefix stem:
+    python aggregate_cv_results.py --prefix eegpt_adhd_fold --suffix _pretrained   # pretrained only
+    python aggregate_cv_results.py --prefix eegpt_adhd_fold --exclude _pretrained  # scratch only
 """
 import argparse
 import glob
@@ -39,7 +45,7 @@ def t_critical(n: int, confidence: float = 0.95) -> float:
     return _T_TABLE_95.get(df, 1.96)  # normal approx for larger df than the table covers
 
 
-def find_metric_records(run_root: str, prefix: str) -> list:
+def find_metric_records(run_root: str, prefix: str, suffix: str = '', exclude: str = '') -> list:
     pattern = os.path.join(run_root, 'log', 'baseline', '*', '*', 'best_test_metrics_*.json')
     matches = []
     for path in glob.glob(pattern):
@@ -48,9 +54,15 @@ def find_metric_records(run_root: str, prefix: str) -> list:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError):
             continue
-        if data.get('experiment_name', '').startswith(prefix):
-            data['_source_path'] = path
-            matches.append(data)
+        name = data.get('experiment_name', '')
+        if not name.startswith(prefix):
+            continue
+        if suffix and not name.endswith(suffix):
+            continue
+        if exclude and exclude in name:
+            continue
+        data['_source_path'] = path
+        matches.append(data)
     return matches
 
 
@@ -88,13 +100,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--prefix', required=True,
                          help="experiment_name prefix to match, e.g. 'neurogpt_adhd_fold'")
+    parser.add_argument('--suffix', default='',
+                         help="optional: only keep names ending with this, e.g. '_pretrained'")
+    parser.add_argument('--exclude', default='',
+                         help="optional: skip names containing this substring, e.g. '_pretrained' "
+                              "to get scratch-only results when pretrained runs share the same prefix")
     parser.add_argument('--run_root', default='assets/run')
     args = parser.parse_args()
 
-    records = find_metric_records(args.run_root, args.prefix)
+    records = find_metric_records(args.run_root, args.prefix, args.suffix, args.exclude)
     if not records:
         print(f"No best_test_metrics_*.json files found with experiment_name starting "
-              f"with '{args.prefix}' under {args.run_root}/log/baseline/")
+              f"with '{args.prefix}'"
+              f"{f' and ending with {args.suffix!r}' if args.suffix else ''}"
+              f"{f' and excluding {args.exclude!r}' if args.exclude else ''} "
+              f"under {args.run_root}/log/baseline/")
         return
 
     print(f"Found {len(records)} run(s) matching prefix '{args.prefix}':")
