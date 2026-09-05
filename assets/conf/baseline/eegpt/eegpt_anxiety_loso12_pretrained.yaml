@@ -11,7 +11,7 @@
 # val AUROC" a circular signal that just tracked training-set overfitting.
 
 seed: 42
-master_port: 52212
+master_port: 29912   # moved off 52212 -- that's inside the Linux ephemeral port range and kept colliding
 multitask: true
 model_type: 'eegpt'
 
