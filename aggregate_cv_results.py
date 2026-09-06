@@ -67,26 +67,42 @@ def find_metric_records(run_root: str, prefix: str, suffix: str = '', exclude: s
 
 
 def aggregate(records: list) -> dict:
+    """Per-metric NaN-aware aggregation.
+
+    A metric can be legitimately undefined for a specific run -- e.g. AUROC
+    has no meaning when a LOSO fold's held-out subject has only one class in
+    their trials, so sklearn has nothing to rank against. Rather than let one
+    NaN poison the whole-cohort mean (plain sum()/n does exactly that), each
+    metric is aggregated only over the runs where it actually has a value.
+    Runs excluded from one metric this way still fully count for every other
+    metric -- nothing is dropped at the run level, only per-metric.
+    """
     per_metric = defaultdict(list)
+    n_total = len(records)
     for rec in records:
         for k, v in rec.get('metrics', {}).items():
-            if isinstance(v, (int, float)):
+            if isinstance(v, (int, float)) and not math.isnan(v):
                 per_metric[k].append(v)
 
     results = {}
     for metric, values in sorted(per_metric.items()):
         n = len(values)
-        mean = sum(values) / n
-        if n > 1:
-            variance = sum((v - mean) ** 2 for v in values) / (n - 1)
-            std = math.sqrt(variance)
-            sem = std / math.sqrt(n)
-            ci_half_width = t_critical(n) * sem
+        n_dropped = n_total - n
+        if n == 0:
+            mean = std = ci_half_width = float('nan')
         else:
-            std = float('nan')
-            ci_half_width = float('nan')
+            mean = sum(values) / n
+            if n > 1:
+                variance = sum((v - mean) ** 2 for v in values) / (n - 1)
+                std = math.sqrt(variance)
+                sem = std / math.sqrt(n)
+                ci_half_width = t_critical(n) * sem
+            else:
+                std = float('nan')
+                ci_half_width = float('nan')
         results[metric] = {
             'n': n,
+            'n_dropped': n_dropped,
             'mean': mean,
             'std': std,
             'ci95_low': mean - ci_half_width,
@@ -128,10 +144,17 @@ def main():
               "install scipy for exact critical values at any fold count.)")
 
     results = aggregate(records)
-    print(f"\n{'metric':32s} {'n':>3s} {'mean':>9s} {'std':>9s} {'95% CI':>22s}")
+    print(f"\n{'metric':32s} {'n':>4s} {'mean':>9s} {'std':>9s} {'95% CI':>22s}")
     for metric, s in results.items():
-        print(f"{metric:32s} {s['n']:>3d} {s['mean']:>9.4f} {s['std']:>9.4f} "
+        n_str = f"{s['n']}*" if s['n_dropped'] else f"{s['n']}"
+        print(f"{metric:32s} {n_str:>4s} {s['mean']:>9.4f} {s['std']:>9.4f} "
               f"[{s['ci95_low']:>9.4f}, {s['ci95_high']:>9.4f}]")
+
+    if any(s['n_dropped'] for s in results.values()):
+        print("\n* n < total matched runs: those runs had no value (NaN) for this specific "
+              "metric -- e.g. AUROC is undefined when a LOSO fold's held-out subject has only "
+              "one class in their trials -- and were excluded from just this metric's "
+              "aggregate. They're still fully included in every other metric above.")
 
 
 if __name__ == '__main__':
