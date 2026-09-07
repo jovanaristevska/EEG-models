@@ -34,6 +34,14 @@ logger = logging.getLogger('preproc')
 # see _divide_loso_split.
 ANXIETY_N_LOSO_FOLDS = 23
 
+# Subject-level, label-balanced 5-fold CV (same scheme ADHD uses) -- each fold's
+# test set is ~4-5 subjects (~140-180 windows) instead of LOSO's single subject
+# (~36 windows), which was giving wildly noisy per-fold test metrics (e.g. fold
+# 12: val AUROC 0.64 vs test AUROC 0.25 on the very same model/epoch, just
+# because its one held-out subject happened to be atypical). See
+# _divide_kfold_split_by_subject.
+ANXIETY_N_KFOLD_FOLDS = 5
+
 
 # ===========================================================================
 # CONFIGURATION
@@ -97,6 +105,12 @@ class AnxietyConfig(EEGConfig):
 
     orig_fs: float = 128.0
 
+    # When n_folds > 0: True selects the leave-one-subject-out path
+    # (_divide_loso_split, one subject per fold); False selects the generic
+    # subject-level label-balanced k-fold path (_divide_kfold_split_by_subject,
+    # ~n_folds-way grouping, same scheme as ADHD).
+    use_loso: bool = False
+
 
 # ===========================================================================
 # BUILDER
@@ -115,9 +129,16 @@ class AnxietyBuilder(EEGDatasetBuilder):
         # only true module-level names.
         AnxietyConfig(
             name=f'finetune_loso{i}', is_finetune=True, wnd_div_sec=4,
-            n_folds=ANXIETY_N_LOSO_FOLDS, fold_idx=i,
+            n_folds=ANXIETY_N_LOSO_FOLDS, fold_idx=i, use_loso=True,
         )
         for i in range(ANXIETY_N_LOSO_FOLDS)
+    ] + [
+        # Subject-level 5-fold CV -- see ANXIETY_N_KFOLD_FOLDS above.
+        AnxietyConfig(
+            name=f'finetune_kfold{i}', is_finetune=True, wnd_div_sec=4,
+            n_folds=ANXIETY_N_KFOLD_FOLDS, fold_idx=i, use_loso=False,
+        )
+        for i in range(ANXIETY_N_KFOLD_FOLDS)
     ]
 
     def __init__(self, config_name='finetune', **kwargs):
@@ -247,8 +268,12 @@ class AnxietyBuilder(EEGDatasetBuilder):
         df['original_subject'] = df['subject'].astype(str).str[:3]
 
         if self.config.n_folds and self.config.n_folds > 0:
-            print(f">>> Leave-one-subject-out split: fold {self.config.fold_idx}/{self.config.n_folds} <<<")
-            df = self._divide_loso_split(df)
+            if self.config.use_loso:
+                print(f">>> Leave-one-subject-out split: fold {self.config.fold_idx}/{self.config.n_folds} <<<")
+                df = self._divide_loso_split(df)
+            else:
+                print(f">>> Subject-level k-fold split: fold {self.config.fold_idx}/{self.config.n_folds} <<<")
+                df = self._divide_kfold_split_by_subject(df)
             print(f"Final split distribution:\n{df['split'].value_counts()}")
             print("=" * 70 + "\n")
             return df
@@ -347,6 +372,26 @@ class AnxietyBuilder(EEGDatasetBuilder):
             f"LOSO fold {fold_idx}/{len(unique_subjects)}: test_subject={test_subject}, "
             f"train_subjects={len(train_subjects)}, valid_subjects={len(valid_subjects)}"
         )
+        return df
+
+    def _divide_kfold_split_by_subject(self, df: DataFrame) -> DataFrame:
+        """Subject-level k-fold split, grouped by `original_subject` (person)
+        rather than the per-trial `subject` id -- same trick _divide_loso_split
+        uses. Delegates the actual fold partitioning to the shared
+        EEGDatasetBuilder._divide_kfold_split (the same one ADHD's 5-fold CV
+        uses), which groups by whatever column is named 'subject' -- so we
+        temporarily present `original_subject` under that name, run the split,
+        then copy the resulting per-row 'split' assignment back onto the real
+        per-trial dataframe (row order/index is preserved throughout, so this
+        is a safe 1:1 copy).
+        """
+        by_subject = df.copy()
+        by_subject['subject'] = by_subject['original_subject']
+        by_subject = self._divide_kfold_split(by_subject)
+
+        df = df.copy()
+        df['split'] = by_subject['split']
+        df = df.drop(columns=['original_subject'])
         return df
 
     def standardize_chs_names(self, montage: str):
